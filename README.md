@@ -88,41 +88,99 @@ CREATE KEYSPACE IF NOT EXISTS "keyspace1"
 Accepted values are `global` and `eventual`. When `consistency` is not given the clause is
 omitted from the DDL entirely, so existing invocations are unaffected.
 
-Requirements and caveats:
+##### Two server capabilities, gated differently
 
-- The server must run with `--experimental-features=strongly-consistent-tables`. Without it
-  the `consistency` option is rejected outright.
-- **The server must also advertise the `TABLETS_ROUTING_V2_EXPERIMENTAL` protocol
-  extension.** These are two separate capabilities and a released ScyllaDB can have the
-  first without the second — ScyllaDB 2026.2.x accepts `consistency = 'global'` but only
-  advertises `TABLETS_ROUTING_V1`. Without V2 the driver never receives a leader-ordered
-  replica list, so no leader routing happens and every request is bounced to the leader by
-  whichever replica received it. The startup check below turns this into a hard failure
-  rather than a silently meaningless run. A server build with the V2 extension is required.
+Leader-aware routing needs two things from the server, and they are **not** the same switch:
+
+- **Strongly consistent tables**, which make `consistency = 'global'` an accepted keyspace
+  option, are gated behind a *cluster feature*. That feature is itself gated behind
+  `--experimental-features=strongly-consistent-tables`, and only turns on once **every** node
+  carries the flag.
+- **`TABLETS_ROUTING_V2_EXPERIMENTAL`**, the protocol extension that carries the
+  leader-ordered replica list, is advertised per node as soon as *that* node has the flag.
+
+So the two can be missing independently, in both directions:
+
+| | `consistency = 'global'` | `TABLETS_ROUTING_V2` |
+|---|---|---|
+| ScyllaDB 2026.2.x, flag on | accepted, stored | **not advertised** |
+| ScyllaDB 2026.4+, flag off | rejected | **not advertised** |
+| ScyllaDB 2026.4+, flag on all nodes | accepted, stored | advertised |
+| ScyllaDB 2026.4+, rolling enable in progress | **rejected** (cluster feature still off) | advertised by the flagged nodes |
+
+The first row is the dangerous one: the keyspace reads back as `global` from `cqlsh` and from
+`system_schema.scylla_keyspaces`, and nothing is leader-routed.
+
+Other requirements and caveats:
+
 - The keyspace must be tablet-based. `NetworkTopologyStrategy` enables tablets by default on
   recent ScyllaDB; `SimpleStrategy` keyspaces may not get tablets, and non-tablet keyspaces
   reject the `consistency` option.
-- Leader routing is **disabled at `cl=one` and `cl=local_one`**, which keep normal spread
-  routing. Note that `local_one` is the default — pass `cl=QUORUM` explicitly.
 - `CREATE KEYSPACE IF NOT EXISTS` will not upgrade a pre-existing eventually consistent
   keyspace. Drop it between consistency-mode changes.
 - Only `write`/`counterwrite` create the keyspace; a `read`-only run requires it to already
   exist.
 
-When `consistency=global` is requested, `cql-stress` checks both capabilities at startup and
-**fails immediately** if either is missing, rather than producing plausible but meaningless
-numbers:
+##### Consistency levels
 
-- the keyspace's consistency mode is read back from `system_schema.scylla_keyspaces`, and
-  must be `global`;
-- the node is asked for its protocol extensions with a bare `OPTIONS` request, and must
-  advertise `TABLETS_ROUTING_V2_EXPERIMENTAL`.
+A strongly consistent keyspace accepts far fewer consistency levels than an ordinary one, and
+rejects them **per request** rather than at connect time — so the wrong `cl=` yields a run in
+which every operation fails:
 
-The run prints `Leader-aware routing: enabled` once both hold. For a keyspace that is already
-strongly consistent without `consistency=global` having been passed, the same findings are
-reported as warnings and the run proceeds. The extension probe opens its own plaintext
-connection, so it is skipped with a warning on a TLS run; verify the routing from the
-coordinator distribution below in that case.
+| | accepted levels |
+|---|---|
+| writes | `QUORUM`, `LOCAL_QUORUM` |
+| reads | `QUORUM`, `LOCAL_QUORUM`, `ONE`, `LOCAL_ONE` |
+
+`ONE` and `LOCAL_ONE` are legal for reads but **turn leader-aware routing off**: any replica
+may serve such a read, so the driver keeps its normal spread routing. Since `local_one` is the
+default `cl`, pass `cl=QUORUM` explicitly — it is the only level that both works for every
+workload and routes to the leader.
+
+`cql-stress` enforces this at startup: an unusable combination fails before any work is done,
+and a legal-but-not-leader-routed one (a read at `ONE`/`LOCAL_ONE`) warns and proceeds.
+
+##### Multi-datacenter clusters
+
+A tablet's Raft leader can live in any datacenter — a globally consistent keyspace gains
+nothing from locality, so nothing pins the leader near the client. Leader-aware routing ranks
+the leader above distance, but only among hosts the load balancing policy would contact at
+all, and `cql-stress` does not enable datacenter failover. So with `-node datacenter=…` set on
+a multi-datacenter cluster, a leader in any **other** datacenter is vetoed: the request goes
+to a local replica and the server forwards it to the leader — precisely the hop leader-aware
+routing exists to remove.
+
+Only the tablets whose leader already sits in the preferred datacenter are leader-routed, so
+the run measures a mixture, and the ratio drifts as ScyllaDB rebalances leaders. Nothing in
+the numbers gives this away: the mode still reads `Global`, leader-aware routing genuinely is
+enabled, and the coordinator distribution is still skewed — just toward local replicas rather
+than leaders. `cql-stress` warns at startup when a strongly consistent keyspace is combined
+with `datacenter=` on a cluster that actually spans more than one; drop `datacenter=` to
+measure leader-aware routing across the whole cluster.
+
+A preferred **rack** is unaffected — the leader outranks rack, and only the datacenter can
+veto it.
+
+##### The startup check
+
+The consistency mode comes from the **driver**, not from `system_schema`. The driver reports
+`Global` only once it has *both* negotiated `TABLETS_ROUTING_V2` with the cluster *and* read
+`consistency = 'global'` for the keyspace — it does not even select that column otherwise. One
+value therefore proves both capabilities at once, including the one no server-side query can
+see: that this build of the driver supports leader-aware routing at all.
+
+Every run prints the mode it measured. When `consistency=global` was requested, anything other
+than `Global` **fails immediately** rather than producing plausible but meaningless numbers;
+the failure lists the possible causes and, when the contact node can be reached in plaintext,
+asks it whether it advertises `TABLETS_ROUTING_V2_EXPERIMENTAL` so the report says which half
+is missing. A run that did not ask for `consistency=global` is never failed on this account.
+
+Once it holds, the run prints:
+
+```
+Keyspace 'keyspace1' consistency mode: Global
+Leader-aware routing: enabled (the driver negotiated TABLETS_ROUTING_V2 with this cluster and keyspace 'keyspace1' is strongly consistent)
+```
 
 #### Verifying leader routing
 
@@ -142,8 +200,9 @@ Interpreting it:
   leader distribution across tablets. It will not be uniform.
 - On an **eventually consistent** keyspace — the control — the same workload spreads across
   all replicas.
-- On a strongly consistent keyspace at `cl=local_one`, the distribution also spreads, because
-  the driver disables leader routing at that level.
+- On a strongly consistent keyspace **read** at `cl=local_one`, the distribution also
+  spreads, because leader routing is off at that level. (Writes are rejected outright there,
+  so there is no write comparison to make.)
 
 Run the control comparison; a single distribution in isolation does not prove much. Accounting
 is off by default and the per-coordinator map is not touched at all when disabled.
