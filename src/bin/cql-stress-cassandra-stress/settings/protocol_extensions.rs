@@ -1,18 +1,19 @@
 //! Asking a node directly which CQL protocol extensions it advertises.
 //!
-//! Leader-aware routing for strongly consistent tables rides on the
-//! `TABLETS_ROUTING_V2_EXPERIMENTAL` extension: only a V2 payload carries a leader-ordered
-//! replica list. The driver negotiates it automatically and exposes nothing about the
-//! outcome - not the negotiated [`ProtocolFeatures`], and (since the keyspace consistency
-//! mode became crate-private) no derived signal either.
+//! This is a diagnostic, not a gate. Whether leader-aware routing is in effect is answered
+//! by the driver itself, through the keyspace's consistency mode; see
+//! `CassandraStressSettings::verify_consistency_mode`. What that answer cannot do is say
+//! *why* it came out negative, and one of the causes is much more confusing than the others:
+//! `TABLETS_ROUTING_V2_EXPERIMENTAL` and strongly consistent tables are independent server
+//! capabilities, so ScyllaDB 2026.2.x stores `consistency = 'global'` in
+//! `system_schema.scylla_keyspaces` - and shows it to `cqlsh` - while advertising only
+//! `TABLETS_ROUTING_V1`. Everything about such a keyspace looks right except the one thing
+//! that matters.
 //!
-//! The two capabilities are genuinely independent: ScyllaDB 2026.2.x accepts
-//! `consistency = 'global'` while advertising only `TABLETS_ROUTING_V1`. A run there looks
-//! strongly consistent from every angle the driver shows and is not leader-routed at all,
-//! which is the one failure this whole feature exists to make impossible. So the node is
-//! asked itself, with the one request that needs no session, no keyspace and no auth: a bare
-//! `OPTIONS`, answered by `SUPPORTED`. Parsing the reply is left to the driver's own
-//! [`ProtocolFeatures`], so the extension keys stay defined in exactly one place.
+//! So on the failure path the node is asked itself, with the one request that needs no
+//! session, no keyspace and no auth: a bare `OPTIONS`, answered by `SUPPORTED`. Parsing the
+//! reply is left to the driver's own [`ProtocolFeatures`], so the extension keys stay defined
+//! in exactly one place.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -38,8 +39,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `node` is a `-node` entry: `host`, `host:port` or an address literal.
 ///
 /// This speaks plaintext CQL, so it cannot probe a TLS-only node; callers that configured TLS
-/// are expected not to call it. Being a startup-only, single-request probe, it runs on a
-/// blocking thread rather than pulling more of tokio into the build.
+/// are expected not to call it. Being a single-request probe on a path that is about to abort
+/// the run anyway, it runs on a blocking thread rather than pulling more of tokio into the
+/// build.
 pub async fn fetch_protocol_features(node: &str) -> Result<ProtocolFeatures> {
     let node = node.to_owned();
     tokio::task::spawn_blocking(move || fetch_protocol_features_blocking(&node))
