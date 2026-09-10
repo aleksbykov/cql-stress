@@ -46,7 +46,10 @@ rand = "0.10"
 rand_distr = "0.6"
 rand_pcg = "0.10"
 regex = "1.12.3"
-scylla = { version = "1.7.0", features = ["openssl-010"] }
+scylla = { version = "1.7.0", features = [
+    "openssl-010",
+    "unstable-strong-consistency",
+] }
 sha2 = "0.11"
 strum = "0.28.0"
 strum_macros = "0.28.0"
@@ -89,6 +92,7 @@ scylla = { version = "1.7.0", features = [
     "openssl-010",
     "num-bigint-04",
     "bigdecimal-04",
+    "unstable-strong-consistency",
 ] }
 
 [lints.rust]
@@ -96,18 +100,24 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(fetch_extended_version_info)',
 ] }
 
-# Build against scylla-rust-driver PR #1788 (leader-aware TABLETS_ROUTING_V2 routing),
-# which is required to benchmark strongly consistent (Raft-per-tablet) tables: the server
-# places the tablet's Raft leader first in the V2 replica list and `DefaultPolicy` routes
-# there deterministically. Negotiation is automatic - there is no client-side opt-in.
+# Build against scylla-rust-driver #1788 (leader-aware TABLETS_ROUTING_V2 routing), which is
+# required to benchmark strongly consistent (Raft-per-tablet) tables: the server places the
+# tablet's Raft leader first in the V2 replica list and `DefaultPolicy` routes there
+# deterministically. Negotiation is automatic - there is no client-side opt-in.
 #
-# NOTE: this tracks an OPEN PR. The rev below is the current head of `dawmd:leader-awareness`
-# (the branch was rebased onto a newer upstream master, so it is not a descendant of the rev
-# pinned before). Revisit when the PR merges and drop this patch in favour of a released
-# `scylla` version.
+# NOTE: #1788 is MERGED (upstream `cf24aa05`, 2026-09-02) but not in any release - v1.8.0 was
+# tagged 2026-08-13, before it. The rev below is upstream `main`, chosen over the merge commit
+# because two follow-ups this build depends on landed after it: `52a857b4` dropped
+# `ConsistencyMode::Local` and `c71ee8c2` (#1887) re-exposed `ConsistencyMode` and
+# `Keyspace::consistency_mode` behind the `unstable-strong-consistency` feature. A release is
+# expected imminently; when it lands, delete this whole section and move the requirement above
+# to it.
 #
 # The patched crate declares version 1.8.0, which the `scylla = "1.7.0"` requirement above
-# accepts; the requirement is deliberately left at 1.7.0 so that dropping this patch resolves
-# to a released version rather than to one that does not exist on crates.io yet.
+# accepts. Note that 1.8.0 is *released* and does NOT contain #1788, so dropping this patch
+# without bumping the requirement would resolve to a driver with no leader-aware routing at
+# all. That mistake cannot pass silently: the `unstable-strong-consistency` feature does not
+# exist in 1.8.0, so cargo fails to resolve rather than building something that benchmarks the
+# wrong thing.
 [patch.crates-io]
-scylla = { git = "https://github.com/dawmd/scylla-rust-driver", rev = "078da28ae793bba5db8fb5644d23d455a7f0b069" }
+scylla = { git = "https://github.com/scylladb/scylla-rust-driver", rev = "ddfaed63edca1c10b2d79230830a60016a53fd91" }

@@ -1,0 +1,13 @@
+# `scylla::cluster::metadata::ConsistencyMode` and `Keyspace::consistency_mode` are the
+# driver's own answer to "is this keyspace strongly consistent, and did this driver negotiate
+# TABLETS_ROUTING_V2 to find out". They are public only behind BOTH the crate's
+# `unstable-strong-consistency` feature (set in Cargo.toml) and this cfg, because strong
+# consistency is an experimental server feature whose API the driver is not ready to freeze.
+#
+# Cargo applies this to every crate in the build, which is harmless: no other crate here reads
+# the cfg. Note that a RUSTFLAGS environment variable *replaces* this setting rather than
+# adding to it, so every place that sets RUSTFLAGS must repeat `--cfg scylla_unstable` - see
+# `Dockerfile` and `.github/workflows/rust.yml`. Getting that wrong is a compile error
+# (`field consistency_mode is private`), never a silently wrong benchmark.
+[build]
+rustflags = ["--cfg", "scylla_unstable"]

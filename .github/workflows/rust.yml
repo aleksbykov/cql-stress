@@ -27,7 +27,9 @@ jobs:
       - name: Clippy check with `user-profile` feature
         run: cargo clippy --tests --features "user-profile" -- -D warnings
       - name: Clippy check with cfg(fetch_extended_version_info)
-        run: RUSTFLAGS="--cfg fetch_extended_version_info" cargo clippy --tests -- -D warnings
+        # RUSTFLAGS replaces `.cargo/config.toml`'s `[build] rustflags` rather than adding to
+        # it, so `--cfg scylla_unstable` has to be repeated here; see that file.
+        run: RUSTFLAGS="--cfg fetch_extended_version_info --cfg scylla_unstable" cargo clippy --tests -- -D warnings
   fmt:
     name: Format
     runs-on: ubuntu-24.04

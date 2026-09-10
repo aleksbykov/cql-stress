@@ -5,7 +5,9 @@ FROM rust:1.89-slim-bookworm AS builder
 
 WORKDIR /app
 
-ENV RUSTFLAGS="--cfg fetch_extended_version_info"
+# RUSTFLAGS replaces `.cargo/config.toml`'s `[build] rustflags` rather than adding to it,
+# so `--cfg scylla_unstable` has to be repeated here; see that file.
+ENV RUSTFLAGS="--cfg fetch_extended_version_info --cfg scylla_unstable"
 ENV CARGO_TERM_COLOR=always
 
 COPY . .
