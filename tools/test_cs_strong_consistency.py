@@ -31,8 +31,9 @@ def leader_aware_routing_supported(session, node, cql_stress) -> str:
     2. the `TABLETS_ROUTING_V2_EXPERIMENTAL` protocol extension. Without it the driver
        never learns a leader-ordered replica list, so requests are spread over the
        tablet's replicas and bounced to the leader. There is no CQL-visible signal for
-       this - it is advertised in the `SUPPORTED` frame - so it is probed through
-       cql-stress, which asks the node itself and refuses to run without it.
+       this - it is advertised in the `SUPPORTED` frame, and the keyspace still reads
+       back as `consistency = 'global'` over CQL - so it is probed through cql-stress,
+       which reports the mode the *driver* sees and refuses to run without it.
     """
     probe = f"ks_sc_probe_{random.randint(0, 100000)}"
     session.execute(f"DROP KEYSPACE IF EXISTS {probe}")
@@ -116,26 +117,74 @@ def run_strong_consistency(node: ScyllaDockerNode, session,
     assert "consistency mode: Global" in result.stdout
 
 
-def run_local_one_warns(node: ScyllaDockerNode,
-                        cql_stress: CqlStressCassandraStress, keyspace: str):
-    """cl=local_one disables leader routing; cql-stress must warn, not refuse to start.
+def run_local_one_write_is_rejected(node: ScyllaDockerNode,
+                                    cql_stress: CqlStressCassandraStress, keyspace: str):
+    """A strongly consistent keyspace cannot be written below QUORUM/LOCAL_QUORUM.
 
-    Whether the run then *completes* is the server's call, not ours: a ScyllaDB that
-    supports leader-aware routing rejects strongly consistent writes below
-    QUORUM/LOCAL_QUORUM outright, so every operation may fail. What is guarded here is
-    that cql-stress lets the run start and says why the measurement would be
-    meaningless - the warning is the only thing standing between a user and a
-    plausible-looking result set that never went near a leader.
+    The server enforces this per request, not at connect time, so without a startup guard
+    the run starts happily and then fails every single operation - a result set that reads
+    like a catastrophic cluster problem and is really a CLI mistake.
     """
     print("\n=== Writing to a strongly consistent keyspace at cl=local_one ===\n")
     result = cql_stress.run_raw(stress_args(
         "write", node, keyspace, cl="local_one", consistency="global"), check=False)
 
     output = result.stdout + result.stderr
+    assert result.returncode != 0, (
+        "a strongly consistent write at cl=local_one was allowed to start")
+    assert "Results:" not in result.stdout, (
+        "the run produced a result summary; it must fail before doing any work")
+    assert "QUORUM and LOCAL_QUORUM" in output, (
+        f"failed, but for an unexpected reason:\n{output}")
+
+
+def run_local_one_read_warns(node: ScyllaDockerNode,
+                             cql_stress: CqlStressCassandraStress, keyspace: str):
+    """Reads at cl=local_one are legal but not leader-routed: warn, do not refuse.
+
+    At ONE and LOCAL_ONE any replica may serve the read, so the driver keeps its normal
+    spread routing. The run is valid - it just does not measure what it set out to - and
+    the warning is the only thing standing between a user and a plausible-looking result
+    set that never went near a leader. local_one being the default `cl` is what makes this
+    worth a test.
+    """
+    print("\n=== Seeding the keyspace at cl=QUORUM ===\n")
+    cql_stress.run_raw(stress_args(
+        "write", node, keyspace, cl="QUORUM", consistency="global"))
+
+    print("\n=== Reading from a strongly consistent keyspace at cl=local_one ===\n")
+    result = cql_stress.run_raw(stress_args(
+        "read", node, keyspace, cl="local_one", consistency="global"), check=False)
+
+    output = result.stdout + result.stderr
     assert "disables leader-aware routing" in result.stdout, (
-        "no warning was emitted for a strongly consistent keyspace driven at cl=local_one")
-    assert result.returncode == 0 or "QUORUM/LOCAL_QUORUM" in output, (
-        f"the run failed for a reason other than the server rejecting the CL:\n{output}")
+        "no warning was emitted for a strongly consistent read at cl=local_one")
+    assert result.returncode == 0, (
+        f"a strongly consistent read at cl=local_one must be allowed to run:\n{output}")
+
+
+def run_unsupported_consistency_level_is_rejected(
+        node: ScyllaDockerNode, cql_stress: CqlStressCassandraStress, keyspace: str):
+    """A CL the server accepts for neither reads nor writes must fail at startup.
+
+    `ALL` is legal against an eventually consistent table and rejected outright against a
+    strongly consistent one, for reads as well as writes.
+    """
+    print("\n=== Seeding the keyspace at cl=QUORUM ===\n")
+    cql_stress.run_raw(stress_args(
+        "write", node, keyspace, cl="QUORUM", consistency="global"))
+
+    print("\n=== Reading from a strongly consistent keyspace at cl=ALL ===\n")
+    result = cql_stress.run_raw(stress_args(
+        "read", node, keyspace, cl="ALL", consistency="global"), check=False)
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, (
+        "a strongly consistent read at cl=ALL was allowed to start")
+    assert "Results:" not in result.stdout, (
+        "the run produced a result summary; it must fail before doing any work")
+    assert "not a consistency level it accepts" in output, (
+        f"failed, but for an unexpected reason:\n{output}")
 
 
 def run_eventually_consistent_keyspace_is_rejected(

@@ -11,8 +11,10 @@ from test_cs_errors_ignore import run as run_errors_ignore
 from test_cs_strong_consistency import (
     leader_aware_routing_supported,
     run_eventually_consistent_keyspace_is_rejected,
-    run_local_one_warns,
+    run_local_one_read_warns,
+    run_local_one_write_is_rejected,
     run_strong_consistency,
+    run_unsupported_consistency_level_is_rejected,
 )
 
 
@@ -214,10 +216,25 @@ def test_strong_consistency(strong_consistency_node, strong_consistency_session,
                            keyspace=strong_consistency_keyspace)
 
 
-def test_strong_consistency_local_one_warns(strong_consistency_node,
-                                            strong_consistency_keyspace, cql_stress):
-    run_local_one_warns(node=strong_consistency_node, cql_stress=cql_stress,
-                        keyspace=strong_consistency_keyspace)
+def test_strong_consistency_local_one_write_is_rejected(
+        strong_consistency_node, strong_consistency_keyspace, cql_stress):
+    run_local_one_write_is_rejected(
+        node=strong_consistency_node, cql_stress=cql_stress,
+        keyspace=strong_consistency_keyspace)
+
+
+def test_strong_consistency_local_one_read_warns(
+        strong_consistency_node, strong_consistency_keyspace, cql_stress):
+    run_local_one_read_warns(
+        node=strong_consistency_node, cql_stress=cql_stress,
+        keyspace=strong_consistency_keyspace)
+
+
+def test_strong_consistency_rejects_unsupported_consistency_level(
+        strong_consistency_node, strong_consistency_keyspace, cql_stress):
+    run_unsupported_consistency_level_is_rejected(
+        node=strong_consistency_node, cql_stress=cql_stress,
+        keyspace=strong_consistency_keyspace)
 
 
 def test_strong_consistency_rejects_eventually_consistent_keyspace(
