@@ -5,9 +5,14 @@
 # consistency is an experimental server feature whose API the driver is not ready to freeze.
 #
 # Cargo applies this to every crate in the build, which is harmless: no other crate here reads
-# the cfg. Note that a RUSTFLAGS environment variable *replaces* this setting rather than
-# adding to it, so every place that sets RUSTFLAGS must repeat `--cfg scylla_unstable` - see
-# `Dockerfile` and `.github/workflows/rust.yml`. Getting that wrong is a compile error
-# (`field consistency_mode is private`), never a silently wrong benchmark.
+# the cfg.
+#
+# A RUSTFLAGS environment variable *replaces* this setting rather than adding to it, so every
+# place that sets RUSTFLAGS must repeat `--cfg scylla_unstable`: see `Dockerfile` and the
+# `env:` block of `.github/workflows/rust.yml`. That includes tools which set RUSTFLAGS on
+# your behalf - `actions-rust-lang/setup-rust-toolchain` exports `RUSTFLAGS=-D warnings`
+# unless it is already set, which is why CI sets it explicitly rather than relying on this
+# file. Getting it wrong is a compile error (`field consistency_mode is private`), never a
+# silently wrong benchmark.
 [build]
 rustflags = ["--cfg", "scylla_unstable"]

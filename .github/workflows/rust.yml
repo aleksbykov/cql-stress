@@ -11,6 +11,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
   PYTHONUNBUFFERED: "1"
+  # `scylla::cluster::metadata::ConsistencyMode` is public only behind this cfg (plus the
+  # `unstable-strong-consistency` feature, set in Cargo.toml), so every Rust job needs it.
+  #
+  # It cannot be left to `.cargo/config.toml`: a RUSTFLAGS environment variable *replaces*
+  # that file's `[build] rustflags` rather than adding to it, and
+  # `actions-rust-lang/setup-rust-toolchain` exports `RUSTFLAGS=-D warnings` of its own --
+  # which would silently drop the cfg. The action only sets RUSTFLAGS when it is not already
+  # set, so defining it here keeps both halves, and `-D warnings` has to be repeated because
+  # the action no longer supplies it.
+  RUSTFLAGS: "-D warnings --cfg scylla_unstable"
 
 jobs:
   check:
@@ -27,8 +37,7 @@ jobs:
       - name: Clippy check with `user-profile` feature
         run: cargo clippy --tests --features "user-profile" -- -D warnings
       - name: Clippy check with cfg(fetch_extended_version_info)
-        # RUSTFLAGS replaces `.cargo/config.toml`'s `[build] rustflags` rather than adding to
-        # it, so `--cfg scylla_unstable` has to be repeated here; see that file.
+        # Overrides the job-wide RUSTFLAGS, so both cfgs have to be repeated here.
         run: RUSTFLAGS="--cfg fetch_extended_version_info --cfg scylla_unstable" cargo clippy --tests -- -D warnings
   fmt:
     name: Format
