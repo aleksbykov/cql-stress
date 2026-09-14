@@ -140,6 +140,31 @@ workload and routes to the leader.
 `cql-stress` enforces this at startup: an unusable combination fails before any work is done,
 and a legal-but-not-leader-routed one (a read at `ONE`/`LOCAL_ONE`) warns and proceeds.
 
+##### User profiles
+
+The `user` command does not use `cl=` at all — each query takes the level from its own
+`consistencyLevel:` in the profile yaml, and a query that declares none inherits the driver's
+`LOCAL_QUORUM` default, which is legal for both reads and writes. The same goes for the
+predefined `insert` operation.
+
+Against a strongly consistent keyspace those per-query levels are validated at startup, using
+the table above: a level the server would reject fails the run, and a read at `ONE`/`LOCAL_ONE`
+warns. Every offending query is named in a single report, so a profile with several mistakes
+takes one run to diagnose rather than several.
+
+`consistency` in `-schema replication(...)` is **rejected** with the `user` command. A user
+profile creates its keyspace from the profile's own `keyspace_definition`, which `cql-stress`
+executes unchanged, so the `-schema` keyspace creation query never runs. Put the property in
+that DDL instead:
+
+```yaml
+keyspace: my_keyspace
+keyspace_definition: |
+  CREATE KEYSPACE IF NOT EXISTS my_keyspace
+  WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3}
+  AND consistency = 'global';
+```
+
 ##### Multi-datacenter clusters
 
 A tablet's Raft leader can live in any datacenter — a globally consistent keyspace gains
