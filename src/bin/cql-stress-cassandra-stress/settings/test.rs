@@ -72,7 +72,9 @@ fn repair_params_test() {
 
 /// A real profile from the integration-test fixtures, so the test exercises the same yaml
 /// shape users write. Its keyspace deliberately differs from the `-schema keyspace=` default.
+#[cfg(feature = "user-profile")]
 const TEST_PROFILE: &str = "tools/util/profiles/cqlstress_text_profile.yaml";
+#[cfg(feature = "user-profile")]
 const TEST_PROFILE_KEYSPACE: &str = "cqlstress_text_keyspace";
 
 #[cfg(feature = "user-profile")]
