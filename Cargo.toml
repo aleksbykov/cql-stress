@@ -105,13 +105,13 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 # tablet's Raft leader first in the V2 replica list and `DefaultPolicy` routes there
 # deterministically. Negotiation is automatic - there is no client-side opt-in.
 #
-# NOTE: #1788 is MERGED (upstream `cf24aa05`, 2026-09-02) but not in any release - v1.8.0 was
-# tagged 2026-08-13, before it. The rev below is upstream `main`, chosen over the merge commit
-# because two follow-ups this build depends on landed after it: `52a857b4` dropped
-# `ConsistencyMode::Local` and `c71ee8c2` (#1887) re-exposed `ConsistencyMode` and
-# `Keyspace::consistency_mode` behind the `unstable-strong-consistency` feature. A release is
-# expected imminently; when it lands, delete this whole section and move the requirement above
-# to it.
+# NOTE: #1788 is MERGED (upstream `cf24aa05`, 2026-09-02) but still not in any release - the
+# newest tag is v1.8.0, cut 2026-08-13, before it. The rev below is the current upstream
+# `main`, chosen over the merge commit because two follow-ups this build depends on landed
+# after it: `52a857b4` dropped `ConsistencyMode::Local` and `c71ee8c2` (#1887) re-exposed
+# `ConsistencyMode` and `Keyspace::consistency_mode` behind the `unstable-strong-consistency`
+# feature. When a release containing #1788 lands, delete this whole section and move the
+# requirement above to it.
 #
 # The patched crate declares version 1.8.0, which the `scylla = "1.7.0"` requirement above
 # accepts. Note that 1.8.0 is *released* and does NOT contain #1788, so dropping this patch
@@ -120,4 +120,4 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 # exist in 1.8.0, so cargo fails to resolve rather than building something that benchmarks the
 # wrong thing.
 [patch.crates-io]
-scylla = { git = "https://github.com/scylladb/scylla-rust-driver", rev = "ddfaed63edca1c10b2d79230830a60016a53fd91" }
+scylla = { git = "https://github.com/scylladb/scylla-rust-driver", rev = "ada16b4e2dd5732250b8108c3ac75988ae53e088" }
