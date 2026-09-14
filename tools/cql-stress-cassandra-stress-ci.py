@@ -186,6 +186,8 @@ def strong_consistency_session(strong_consistency_node, cql_stress):
         pytest.skip(f"strongly-consistent-tables node is not reachable: {e}")
 
     try:
+        # Only a genuine server-capability string reaches here: the probe raises on a
+        # broken binary or a broken environment rather than returning a skip reason for it.
         unsupported = leader_aware_routing_supported(
             session, strong_consistency_node, cql_stress)
         if unsupported:

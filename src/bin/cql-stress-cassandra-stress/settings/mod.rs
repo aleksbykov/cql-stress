@@ -197,29 +197,12 @@ impl CassandraStressSettings {
                 // The mode alone cannot say which of the causes applied, so ask the node
                 // whether it could ever route to a leader before giving up.
                 let diagnosis = self.diagnose_missing_strong_consistency().await;
-                anyhow::bail!(
-                    "Requested consistency=global, but the driver does not see keyspace \
-                     '{keyspace}' as strongly consistent (mode: {reported_mode}). This run \
-                     would not measure strong consistency. The driver reports Global only \
-                     once it has both negotiated TABLETS_ROUTING_V2 with this cluster and \
-                     read consistency='global' for the keyspace, so any of these breaks \
-                     it:\n\
-                     - the server does not run with \
-                     --experimental-features=strongly-consistent-tables;\n\
-                     - the cluster feature gating strongly consistent tables is not enabled \
-                     yet - it turns on only once every node carries that flag, so a \
-                     partially upgraded cluster lands here;\n\
-                     - the server does not advertise TABLETS_ROUTING_V2_EXPERIMENTAL, which \
-                     is a capability separate from accepting consistency='global' (ScyllaDB \
-                     2026.2.x has the second without the first);\n\
-                     - keyspace '{keyspace}' already exists as an eventually consistent \
-                     keyspace (CREATE KEYSPACE IF NOT EXISTS will not upgrade it - drop it \
-                     first);\n\
-                     - the keyspace is not tablet-based (non-tablet keyspaces reject the \
-                     consistency option; SimpleStrategy may not get tablets).\n\
-                     DDL used: {ddl}{diagnosis}",
-                    ddl = self.schema.construct_keyspace_creation_query(),
-                );
+                anyhow::bail!(strong_consistency_failure_message(
+                    keyspace,
+                    &reported_mode,
+                    &self.schema.construct_keyspace_creation_query(),
+                    &diagnosis,
+                ));
             }
 
             return Ok(());
@@ -443,6 +426,49 @@ impl CassandraStressSettings {
             self.node.nodes.len(),
         )
     }
+}
+
+/// Marks the startup failure raised when a run asked for `consistency=global` and would not
+/// have measured it.
+///
+/// The integration tests have to tell this apart from a binary that is simply broken - a
+/// panic, a renamed CLI option, an unreachable node - because they *skip* on the first and
+/// must *fail* on the second. Matching on prose would make every reword a silent un-skip, so
+/// the failure carries a stable code and `tools/test_cs_strong_consistency.py` matches on it.
+pub const STRONG_CONSISTENCY_UNAVAILABLE_CODE: &str = "STRONG_CONSISTENCY_UNAVAILABLE";
+
+/// Builds the failure raised when `consistency=global` was requested but the driver does not
+/// see the keyspace as strongly consistent.
+///
+/// Split out from `verify_consistency_mode` so a unit test can pin the diagnostic code
+/// without a live cluster - see [`STRONG_CONSISTENCY_UNAVAILABLE_CODE`].
+fn strong_consistency_failure_message(
+    keyspace: &str,
+    reported_mode: &str,
+    ddl: &str,
+    diagnosis: &str,
+) -> String {
+    format!(
+        "Requested consistency=global, but the driver does not see keyspace '{keyspace}' as \
+         strongly consistent (mode: {reported_mode}). This run would not measure strong \
+         consistency. The driver reports Global only once it has both negotiated \
+         TABLETS_ROUTING_V2 and read consistency='global' for the keyspace, so any of these \
+         breaks it:\n\
+         - the server does not run with \
+         --experimental-features=strongly-consistent-tables;\n\
+         - the cluster feature gating strongly consistent tables is not enabled yet - it \
+         turns on only once every node carries that flag, so a partially upgraded cluster \
+         lands here;\n\
+         - the server does not advertise TABLETS_ROUTING_V2_EXPERIMENTAL, which is a \
+         capability separate from accepting consistency='global' (ScyllaDB 2026.2.x has the \
+         second without the first);\n\
+         - keyspace '{keyspace}' already exists as an eventually consistent keyspace (CREATE \
+         KEYSPACE IF NOT EXISTS will not upgrade it - drop it first);\n\
+         - the keyspace is not tablet-based (non-tablet keyspaces reject the consistency \
+         option; SimpleStrategy may not get tablets).\n\
+         DDL used: {ddl}{diagnosis}\n\
+         (diagnostic code: {STRONG_CONSISTENCY_UNAVAILABLE_CODE})"
+    )
 }
 
 /// Turns the per-node `TABLETS_ROUTING_V2_EXPERIMENTAL` answers into the sentence appended to

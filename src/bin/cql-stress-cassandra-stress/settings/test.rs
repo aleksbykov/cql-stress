@@ -198,3 +198,24 @@ fn summarise_v2_probe_test() {
     let capped = summarise_v2_probe(&["a"], &[], &[], 1, 20);
     assert!(capped.contains("first 1 of 20, 19 not probed"), "{capped}");
 }
+
+/// `tools/test_cs_strong_consistency.py` tells "this server cannot do leader-aware routing"
+/// (skip the suite) from "the binary is broken" (fail the job) by matching this code. Pin it
+/// here so rewording the failure breaks a fast unit test rather than silently turning the
+/// integration job green by skipping everything.
+#[test]
+fn strong_consistency_failure_carries_its_diagnostic_code_test() {
+    let message = super::strong_consistency_failure_message(
+        "keyspace1",
+        "Eventual",
+        "CREATE KEYSPACE ...",
+        "\ndiagnosis here",
+    );
+
+    assert!(
+        message.contains(super::STRONG_CONSISTENCY_UNAVAILABLE_CODE),
+        "the integration probe matches on this code: {message}"
+    );
+    assert!(message.contains("keyspace1"), "{message}");
+    assert!(message.contains("diagnosis here"), "{message}");
+}

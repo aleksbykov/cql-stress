@@ -16,6 +16,21 @@ import random
 from util.cassandra_stress import CqlStressCassandraStress
 from util.scylla_docker import ScyllaDockerNode
 
+# The diagnostic code cql-stress puts on its strong-consistency startup failure; see
+# `STRONG_CONSISTENCY_UNAVAILABLE_CODE` in `settings/mod.rs`, where a unit test pins it.
+# Matching a code rather than prose means rewording the failure breaks that unit test
+# instead of quietly turning this suite into an unconditional skip.
+UNAVAILABLE_CODE = "STRONG_CONSISTENCY_UNAVAILABLE"
+
+# How the server itself says it will not take `consistency = 'global'`. Anything else coming
+# out of the probe DDL is a real failure, not a missing capability.
+FEATURE_MISSING_MARKERS = (
+    "Unknown property 'consistency'",
+    "strongly_consistent_tables",
+    "strongly-consistent-tables",
+    "tablet replication",
+)
+
 
 def leader_aware_routing_supported(session, node, cql_stress) -> str:
     """Returns "" when the server can support leader-aware routing, else why not.
@@ -45,6 +60,11 @@ def leader_aware_routing_supported(session, node, cql_stress) -> str:
                 "AND consistency = 'global'"
             )
         except Exception as e:
+            # Only the server's own rejection of the option means "no such feature here".
+            # An auth failure, a timeout or a syntax error must not be laundered into a
+            # skip: that would leave the whole suite green without running anything.
+            if not any(marker in str(e) for marker in FEATURE_MISSING_MARKERS):
+                raise
             return f"server does not support the strongly-consistent-tables feature: {e}"
 
         # n must stay above 1: a single-operation run cannot build its sequence
@@ -52,11 +72,28 @@ def leader_aware_routing_supported(session, node, cql_stress) -> str:
         result = cql_stress.run_raw(
             stress_args("write", node, probe, cl="QUORUM", consistency="global", n=10),
             check=False)
-        if "Leader-aware routing: enabled" not in result.stdout:
+
+        # A server that cannot do leader-aware routing makes cql-stress abort at startup, so
+        # a nonzero exit is expected in the one case this probe may skip on - and it is
+        # identified by the diagnostic code the failure carries, not by its prose. Every
+        # other nonzero exit is a broken binary or a broken environment and has to fail the
+        # job: a probe that cannot tell them apart turns the whole suite green by skipping
+        # it, which is the one failure mode this job must not have.
+        if result.returncode != 0:
+            if UNAVAILABLE_CODE not in result.stdout:
+                raise AssertionError(
+                    f"cql-stress capability probe failed unexpectedly "
+                    f"(exit {result.returncode}); this is not a missing server capability.\n"
+                    f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}")
             return ("server does not advertise TABLETS_ROUTING_V2_EXPERIMENTAL, so the "
                     "driver cannot do leader-aware routing (the keyspace is 'global' "
                     "server-side, but no leader-ordered replica list ever reaches the "
                     "driver)")
+
+        if "Leader-aware routing: enabled" not in result.stdout:
+            raise AssertionError(
+                "cql-stress exited 0 but did not report leader-aware routing; the probe "
+                f"cannot classify this.\n--- stdout ---\n{result.stdout}")
     finally:
         session.execute(f"DROP KEYSPACE IF EXISTS {probe}")
     return ""
