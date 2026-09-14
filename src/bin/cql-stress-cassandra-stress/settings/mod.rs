@@ -130,14 +130,23 @@ impl CassandraStressSettings {
     ///
     /// The mode comes from the driver rather than from `system_schema` on purpose. The
     /// driver reports [`ConsistencyMode::Global`] only when it *both* negotiated the
-    /// `TABLETS_ROUTING_V2` protocol extension with this cluster *and* read
-    /// `consistency = 'global'` for the keyspace - it does not even select that column
-    /// otherwise. One value therefore proves both halves of leader-aware routing, including
-    /// the half no server-side query can see: that this build of the driver supports it at
-    /// all. Asking the server directly would not: ScyllaDB 2026.2.x records
-    /// `consistency = 'global'` in `system_schema.scylla_keyspaces` while advertising only
-    /// `TABLETS_ROUTING_V1`, and a driver without leader-aware routing reads back exactly
-    /// the same rows as one with it.
+    /// `TABLETS_ROUTING_V2` protocol extension *and* read `consistency = 'global'` for the
+    /// keyspace - it does not even select that column otherwise. One value therefore proves
+    /// both halves of leader-aware routing, including the half no server-side query can see:
+    /// that this build of the driver supports it at all. Asking the server directly would
+    /// not: ScyllaDB 2026.2.x records `consistency = 'global'` in
+    /// `system_schema.scylla_keyspaces` while advertising only `TABLETS_ROUTING_V1`, and a
+    /// driver without leader-aware routing reads back exactly the same rows as one with it.
+    ///
+    /// What it does *not* prove is that every node advertises the extension. The mode is read
+    /// over the connection the driver fetches cluster metadata on, and the extension is
+    /// negotiated per connection, so a cluster midway through a rolling enable can report
+    /// `Global` while some workload connections still cannot be handed a leader-ordered
+    /// replica list. There is no public driver API for the aggregate, and probing every node
+    /// from here would not work over TLS and would put an extra connection on the startup
+    /// path of every healthy run. The empirical check is the coordinator distribution from
+    /// `-log coordinators=true`: a mixed cluster shows up there as a spread across replicas
+    /// instead of a skew toward leaders, which is why the success message points at it.
     ///
     /// When `consistency=global` was requested, anything short of that is a hard startup
     /// failure. Every way this can go wrong otherwise produces a full, plausible,
@@ -217,8 +226,12 @@ impl CassandraStressSettings {
         }
 
         println!(
-            "Leader-aware routing: enabled (the driver negotiated TABLETS_ROUTING_V2 with \
-             this cluster and keyspace '{keyspace}' is strongly consistent)"
+            "Leader-aware routing: enabled (keyspace '{keyspace}' is strongly consistent and \
+             the driver negotiated TABLETS_ROUTING_V2 with the node it read cluster metadata \
+             from). On a cluster where the strongly-consistent-tables flag is still being \
+             rolled out, nodes that do not yet carry it cannot hand out a leader-ordered \
+             replica list; run with -log coordinators=true and check that the distribution is \
+             skewed toward leaders rather than spread evenly across replicas."
         );
 
         // Keyed on the mode the keyspace actually has, not on what was requested: a

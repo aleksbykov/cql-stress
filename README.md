@@ -111,6 +111,15 @@ So the two can be missing independently, in both directions:
 The first row is the dangerous one: the keyspace reads back as `global` from `cqlsh` and from
 `system_schema.scylla_keyspaces`, and nothing is leader-routed.
 
+The last row has a subtler variant. Once enough of a rolling enable has completed for the
+cluster feature to turn on, a keyspace can be `global` while some nodes still lack the flag
+and so cannot hand out a leader-ordered replica list. The startup check reads the mode over
+the connection the driver fetches cluster metadata on, so it reports `Global` and the run
+proceeds with a fraction of its requests not leader-routed. Nothing in the mode gives this
+away — the signal is the coordinator distribution from `-log coordinators=true`, which shows
+a spread across replicas instead of a skew toward leaders. Prefer a cluster where the rollout
+has finished.
+
 Other requirements and caveats:
 
 - The keyspace must be tablet-based. `NetworkTopologyStrategy` enables tablets by default on
@@ -189,10 +198,11 @@ veto it.
 ##### The startup check
 
 The consistency mode comes from the **driver**, not from `system_schema`. The driver reports
-`Global` only once it has *both* negotiated `TABLETS_ROUTING_V2` with the cluster *and* read
+`Global` only once it has *both* negotiated `TABLETS_ROUTING_V2` *and* read
 `consistency = 'global'` for the keyspace — it does not even select that column otherwise. One
 value therefore proves both capabilities at once, including the one no server-side query can
-see: that this build of the driver supports leader-aware routing at all.
+see: that this build of the driver supports leader-aware routing at all. It does not prove
+that *every* node advertises the extension — see the rolling-enable note above.
 
 Every run prints the mode it measured. When `consistency=global` was requested, anything other
 than `Global` **fails immediately** rather than producing plausible but meaningless numbers;
