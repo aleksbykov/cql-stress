@@ -68,6 +68,21 @@ impl CassandraStressSettings {
         println!();
     }
 
+    /// The keyspace this run actually drives.
+    ///
+    /// A user profile creates and uses the keyspace declared in its yaml; every other
+    /// command uses the `-schema keyspace=` value. The two are independent - `-schema` is
+    /// not consulted at all in user mode - so every strong-consistency check has to follow
+    /// the one the operations will really hit, or it inspects a keyspace nothing in the run
+    /// touches.
+    fn workload_keyspace(&self) -> &str {
+        #[cfg(feature = "user-profile")]
+        if let Some(user) = &self.command_params.user {
+            return &user.keyspace;
+        }
+        &self.schema.keyspace
+    }
+
     pub async fn create_schema(&self, session: &Session) -> Result<()> {
         #[cfg(feature = "user-profile")]
         if let Some(user) = &self.command_params.user {
@@ -148,7 +163,7 @@ impl CassandraStressSettings {
             .await
             .context("Failed to refresh cluster metadata")?;
 
-        let keyspace = &self.schema.keyspace;
+        let keyspace = self.workload_keyspace();
         let cluster_state = session.get_cluster_state();
         // `None` means the keyspace does not exist at all, which is a different thing from
         // existing as eventually consistent, and the two get different messages below.
@@ -256,7 +271,7 @@ impl CassandraStressSettings {
         }
         datacenters.sort_unstable();
 
-        let keyspace = &self.schema.keyspace;
+        let keyspace = self.workload_keyspace();
         println!();
         println!(
             "WARNING: keyspace '{keyspace}' is strongly consistent and this run prefers \
@@ -290,7 +305,17 @@ impl CassandraStressSettings {
     /// rather than an error - the run works, it just does not measure what it set out to -
     /// and it matters because `local_one` is the default `cl`.
     fn verify_consistency_level(&self) -> Result<()> {
-        let keyspace = &self.schema.keyspace;
+        // A user profile does not apply `cl=` to anything: each statement carries the level
+        // from its yaml `consistencyLevel:`, or the driver's default. Validating the CLI
+        // value here would report on a setting that has no effect on the run. Those
+        // statements are checked where they are prepared, against their effective levels -
+        // see `UserOperationFactory::verify_profile_consistency_levels`.
+        #[cfg(feature = "user-profile")]
+        if self.command_params.user.is_some() {
+            return Ok(());
+        }
+
+        let keyspace = self.workload_keyspace();
         let cl = self.command_params.common.consistency_level;
 
         if matches!(cl, Consistency::Quorum | Consistency::LocalQuorum) {
@@ -306,49 +331,40 @@ impl CassandraStressSettings {
         );
 
         // ONE / LOCAL_ONE from here on: accepted for reads, rejected for writes.
-        let warning = match self.issues_writes() {
-            Some(true) => anyhow::bail!(
-                "Keyspace '{keyspace}' is strongly consistent, but cl={cl} cannot be used to \
-                 write to it: the server accepts only QUORUM and LOCAL_QUORUM for strongly \
-                 consistent writes and would reject every operation in this run. Use \
-                 cl=QUORUM."
-            ),
-            Some(false) => format!(
-                "WARNING: keyspace '{keyspace}' is strongly consistent, but cl={cl} disables \
-                 leader-aware routing: at ONE and LOCAL_ONE any replica may serve the read, \
-                 so the driver keeps normal spread routing and requests are forwarded to the \
-                 leader by whichever replica received them. Note that local_one is the \
-                 default cl. Use cl=QUORUM to measure strong consistency."
-            ),
-            // A user profile runs whatever its yaml says, so whether this run writes cannot
-            // be known here. Warn about both halves instead of guessing.
-            None => format!(
-                "WARNING: keyspace '{keyspace}' is strongly consistent and cl={cl}. Any write \
-                 in this profile will be rejected - the server accepts only QUORUM and \
-                 LOCAL_QUORUM for strongly consistent writes - and the reads that do go \
-                 through are not leader-routed, because at ONE and LOCAL_ONE any replica may \
-                 serve them. Use cl=QUORUM to measure strong consistency."
-            ),
-        };
+        anyhow::ensure!(
+            !self.issues_writes(),
+            "Keyspace '{keyspace}' is strongly consistent, but cl={cl} cannot be used to \
+             write to it: the server accepts only QUORUM and LOCAL_QUORUM for strongly \
+             consistent writes and would reject every operation in this run. Use cl=QUORUM."
+        );
 
         println!();
-        println!("{warning}");
+        println!(
+            "WARNING: keyspace '{keyspace}' is strongly consistent, but cl={cl} disables \
+             leader-aware routing: at ONE and LOCAL_ONE any replica may serve the read, so \
+             the driver keeps normal spread routing and requests are forwarded to the leader \
+             by whichever replica received them. Note that local_one is the default cl. Use \
+             cl=QUORUM to measure strong consistency."
+        );
         println!();
 
         Ok(())
     }
 
     /// Whether this run issues writes, which decides how strict a strongly consistent
-    /// keyspace is about `cl=`. `None` for a user profile, whose operations come from a yaml
-    /// file and can be either.
-    fn issues_writes(&self) -> Option<bool> {
+    /// keyspace is about `cl=`.
+    ///
+    /// A user profile never reaches this: its statements carry their own levels and are
+    /// checked individually where they are prepared, so `verify_consistency_level` returns
+    /// before asking.
+    fn issues_writes(&self) -> bool {
         match self.command {
-            Command::Write | Command::CounterWrite | Command::Mixed => Some(true),
-            Command::Read | Command::CounterRead => Some(false),
+            Command::Write | Command::CounterWrite | Command::Mixed => true,
+            Command::Read | Command::CounterRead => false,
+            // Not workloads, or checked elsewhere - they never reach this far.
             #[cfg(feature = "user-profile")]
-            Command::User => None,
-            // Not workloads - they never reach this far.
-            Command::Help | Command::Version | Command::VersionJson => Some(false),
+            Command::User => false,
+            Command::Help | Command::Version | Command::VersionJson => false,
         }
     }
 
@@ -538,6 +554,20 @@ where
                 .collect::<Vec<_>>();
             unknowns.join("\n")
         };
+
+        // A user profile brings its own keyspace DDL, which cql-stress passes through
+        // unchanged, so the `-schema` keyspace creation query is never executed in user mode
+        // and `consistency=` in it has no effect whatsoever. Rejecting it is the only way the
+        // user finds out: accepted silently it reads like a request that was honoured, and
+        // the run then measures an eventually consistent keyspace while claiming otherwise.
+        #[cfg(feature = "user-profile")]
+        anyhow::ensure!(
+            !(matches!(command, Command::User) && schema.consistency.is_some()),
+            "-schema replication(consistency=...) has no effect with the 'user' command: a \
+             user profile creates its keyspace from the profile's keyspace_definition, which \
+             cql-stress executes unchanged. Put `AND consistency = 'global'` in that DDL \
+             instead."
+        );
 
         // Ensure that all of the CLI arguments were consumed.
         // If not, then unknown arguments appeared so we return the error.
