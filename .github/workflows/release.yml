@@ -6,7 +6,13 @@ on:
       - "v*"
 
 env:
-  RUSTFLAGS: "--cfg fetch_extended_version_info"
+  # `--cfg scylla_unstable` must be repeated here. A RUSTFLAGS environment variable
+  # *replaces* `.cargo/config.toml`'s `[build] rustflags` rather than adding to it, so
+  # setting only `fetch_extended_version_info` drops the cfg that makes
+  # `scylla::cluster::metadata::ConsistencyMode` public, and `release-artifacts` then fails
+  # to compile with `field consistency_mode is private`. Keep in sync with `Dockerfile` and
+  # `.github/workflows/rust.yml`.
+  RUSTFLAGS: "--cfg fetch_extended_version_info --cfg scylla_unstable"
   CARGO_TERM_COLOR: always
   PYTHONUNBUFFERED: "1"
 

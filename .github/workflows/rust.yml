@@ -39,6 +39,13 @@ jobs:
       - name: Clippy check with cfg(fetch_extended_version_info)
         # Overrides the job-wide RUSTFLAGS, so both cfgs have to be repeated here.
         run: RUSTFLAGS="--cfg fetch_extended_version_info --cfg scylla_unstable" cargo clippy --tests -- -D warnings
+      - name: Build the release profile with the release workflow's RUSTFLAGS
+        # `release.yml` builds the tagged artifacts with its own RUSTFLAGS, which replaces
+        # `.cargo/config.toml`'s. Build the same way here so that dropping a cfg there breaks
+        # a PR rather than a tag: a release build is otherwise never exercised until a tag is
+        # pushed, and the failure mode is a compile error after the GitHub release has already
+        # been created.
+        run: RUSTFLAGS="--cfg fetch_extended_version_info --cfg scylla_unstable" cargo build --profile dist --all
   fmt:
     name: Format
     runs-on: ubuntu-24.04
