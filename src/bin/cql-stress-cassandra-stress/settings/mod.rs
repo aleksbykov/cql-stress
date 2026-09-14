@@ -390,41 +390,125 @@ impl CassandraStressSettings {
     /// happily stores `consistency = 'global'` - from an ordinary "this keyspace was not
     /// created strongly consistent".
     ///
+    /// Every configured contact node is asked, not just the first: the session is built from
+    /// the whole `-node` list, so generalising from one of them gets the answer exactly
+    /// backwards on a cluster midway through a rolling enable, where the first contact point
+    /// carries the flag and another does not. When the nodes disagree, that disagreement *is*
+    /// the diagnosis and is reported as such.
+    ///
     /// Returns a sentence to append to the failure, or an empty string when there is nothing
     /// useful to add. It runs only on the failure path, so a healthy run pays nothing for it.
     async fn diagnose_missing_strong_consistency(&self) -> String {
-        let Some(node) = self.node.nodes.first() else {
+        if self.node.nodes.is_empty() {
             return String::new();
-        };
+        }
 
         // The probe speaks plaintext CQL and cannot reach a TLS-only node.
         if self.transport.truststore.is_some() || self.transport.keystore.is_some() {
-            return format!(
-                "\nNode '{node}' was not asked whether it advertises \
+            return String::from(
+                "\nThe configured nodes were not asked whether they advertise \
                  TABLETS_ROUTING_V2_EXPERIMENTAL: the probe speaks plaintext CQL and this \
-                 run uses TLS."
+                 run uses TLS.",
             );
         }
 
-        match fetch_protocol_features(node).await {
-            Ok(features) if features.tablets_v2_supported => format!(
-                "\nNode '{node}' does advertise TABLETS_ROUTING_V2_EXPERIMENTAL, so this \
-                 server can route to tablet leaders - the keyspace itself is what is not \
-                 strongly consistent."
-            ),
-            Ok(_) => format!(
-                "\nNode '{node}' does NOT advertise TABLETS_ROUTING_V2_EXPERIMENTAL, so it \
-                 cannot hand the driver a leader-ordered replica list at all. This is a \
-                 capability separate from accepting consistency='global': ScyllaDB 2026.2.x \
-                 stores 'global' in system_schema.scylla_keyspaces while advertising only \
-                 TABLETS_ROUTING_V1, which is exactly why the mode above reads as eventual."
-            ),
-            Err(error) => format!(
-                "\nNode '{node}' could not be asked whether it advertises \
-                 TABLETS_ROUTING_V2_EXPERIMENTAL: {error:#}"
-            ),
+        // A long -node list would make the failure unreadable, and the answer is a cluster
+        // property: a handful of nodes is enough to tell a uniform cluster from a mixed one.
+        const MAX_PROBED_NODES: usize = 8;
+        let probed = &self.node.nodes[..self.node.nodes.len().min(MAX_PROBED_NODES)];
+
+        let outcomes = futures::future::join_all(
+            probed
+                .iter()
+                .map(|node| async move { (node.as_str(), fetch_protocol_features(node).await) }),
+        )
+        .await;
+
+        let mut with_v2 = Vec::new();
+        let mut without_v2 = Vec::new();
+        let mut unreachable = Vec::new();
+        for (node, result) in &outcomes {
+            match result {
+                Ok(features) if features.tablets_v2_supported => with_v2.push(*node),
+                Ok(_) => without_v2.push(*node),
+                Err(error) => unreachable.push(format!("{node} ({error:#})")),
+            }
         }
+
+        summarise_v2_probe(
+            &with_v2,
+            &without_v2,
+            &unreachable,
+            probed.len(),
+            self.node.nodes.len(),
+        )
     }
+}
+
+/// Turns the per-node `TABLETS_ROUTING_V2_EXPERIMENTAL` answers into the sentence appended to
+/// a failed strong-consistency check.
+///
+/// Split out from the probe itself so the wording - which is the whole point of the
+/// diagnostic - can be tested without a server. A conclusion is drawn only when the nodes
+/// agree; when they disagree, the disagreement is the diagnosis, because a cluster part-way
+/// through enabling the experimental feature is the most confusing state this check can land
+/// in and the one a single-node probe reports exactly backwards.
+fn summarise_v2_probe(
+    with_v2: &[&str],
+    without_v2: &[&str],
+    unreachable: &[String],
+    probed: usize,
+    total: usize,
+) -> String {
+    let mut report = String::from(
+        "\nAsked the configured nodes whether they advertise TABLETS_ROUTING_V2_EXPERIMENTAL",
+    );
+    if total > probed {
+        report.push_str(&format!(
+            " (first {probed} of {total}, {} not probed)",
+            total - probed
+        ));
+    }
+    report.push_str(":\n");
+
+    match (with_v2.is_empty(), without_v2.is_empty()) {
+        // Nobody advertises it: these servers cannot route to leaders at all.
+        (true, false) => report.push_str(&format!(
+            "- none of them do ({}), so no node can hand the driver a leader-ordered replica \
+             list. This is a capability separate from accepting consistency='global': \
+             ScyllaDB 2026.2.x stores 'global' in system_schema.scylla_keyspaces while \
+             advertising only TABLETS_ROUTING_V1, which is exactly why the mode above reads \
+             as eventual.",
+            without_v2.join(", ")
+        )),
+        // All of them do: the extension is not the missing half.
+        (false, true) => report.push_str(&format!(
+            "- all of them do ({}), so these servers can route to tablet leaders - the \
+             keyspace itself is what is not strongly consistent.",
+            with_v2.join(", ")
+        )),
+        // Mixed.
+        (false, false) => report.push_str(&format!(
+            "- some do ({}) and some do not ({}). The cluster is part-way through enabling \
+             --experimental-features=strongly-consistent-tables: the cluster feature that \
+             gates consistency='global' stays off until every node carries the flag, so the \
+             keyspace cannot be created strongly consistent yet even though some nodes could \
+             already route to leaders. Finish the rollout and retry.",
+            with_v2.join(", "),
+            without_v2.join(", ")
+        )),
+        // Nothing answered at all.
+        (true, true) => report.push_str("- none of them could be reached."),
+    }
+
+    if !unreachable.is_empty() {
+        report.push_str(&format!(
+            "\n- could not be asked: {}",
+            unreachable.join(", ")
+        ));
+    }
+
+    report
 }
 
 pub enum CassandraStressParsingResult {
