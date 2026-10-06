@@ -184,7 +184,8 @@ pub const STRONG_CONSISTENCY_UNAVAILABLE_CODE: &str = "STRONG_CONSISTENCY_UNAVAI
 /// Refreshes metadata, then returns the driver's view of the keyspace; None = absent.
 pub async fn keyspace_consistency_mode(session: &Session, keyspace: &str) -> Result<Option<ConsistencyMode>>;
 /// The start-up failure: carries the code and the per-node TABLETS_ROUTING_V2 diagnosis.
-pub async fn unavailable_error(keyspace: &str, mode: Option<&ConsistencyMode>, ddl: &str, nodes: &[String]) -> anyhow::Error;
+/// `tls`: the probe speaks plaintext CQL, so a TLS run is told the nodes were not asked.
+pub async fn unavailable_error(keyspace: &str, reported_mode: &str, ddl: &str, nodes: &[String], tls: bool) -> anyhow::Error;
 pub async fn fetch_protocol_features(node: &str) -> Result<ProtocolFeatures>;
 ```
 
@@ -217,6 +218,7 @@ files and the `archive/` layout these need, and the CLI leaves room for
 
 - One task directory covers all CS work for SCYLLADB-4519; the small steps live in `plan.md`, not in Jira subtasks. (spec)
 - The Confluence spec is the design source; this file condenses the part that cql-stress builds. (spec)
+- `unavailable_error` takes the reported mode as text and a `tls` flag, so the cassandra-stress message stays the same for TLS runs. (build)
 - One spec for all of M1, not split off for the T1/T2 library move: Confluence §6 sets one PR per repo per milestone. (review)
 - `clap` is added for the new binary's CLI (user, 2026-09-25). (spec)
 - The binary has `required-features = ["strong-consistency"]`, and that feature also turns on `serde`, `serde_yaml` and `clap`. A default build stays as it is. (spec)

@@ -17,7 +17,7 @@ from util.cassandra_stress import CqlStressCassandraStress
 from util.scylla_docker import ScyllaDockerNode
 
 # The diagnostic code cql-stress puts on its strong-consistency startup failure; see
-# `STRONG_CONSISTENCY_UNAVAILABLE_CODE` in `settings/mod.rs`, where a unit test pins it.
+# `STRONG_CONSISTENCY_UNAVAILABLE_CODE` in `src/strong_consistency.rs`, where a unit test pins it.
 # Matching a code rather than prose means rewording the failure breaks that unit test
 # instead of quietly turning this suite into an unconditional skip.
 UNAVAILABLE_CODE = "STRONG_CONSISTENCY_UNAVAILABLE"

@@ -56,10 +56,10 @@ new `keyspace_consistency_mode(session, keyspace)` (refresh plus lookup) and
 today's "not asked, TLS" message, so the spec's `unavailable_error` gains `tls: bool`.
 Update the spec's Module API in this commit.
 
-- [ ] Move `summarise_v2_probe_test` and `strong_consistency_failure_carries_its_diagnostic_code_test` to the end of `src/strong_consistency.rs`; they fail to compile until the code moves.
-- [ ] Move the code; the binary keeps its CL check and datacenter warning.
-- [ ] Run verify and the SC pytest; the failure text is unchanged (the pytest matches the code).
-- [ ] Commit `refactor: move the strong consistency keyspace check into the library [SCYLLADB-4519]`.
+- [x] Move `summarise_v2_probe_test` and `strong_consistency_failure_carries_its_diagnostic_code_test` to the end of `src/strong_consistency.rs`; they fail to compile until the code moves.
+- [x] Move the code; the binary keeps its CL check and datacenter warning.
+- [x] Run verify and the SC pytest; the failure text is unchanged (the pytest matches the code).
+- [x] Commit `refactor: move the strong consistency keyspace check into the library [SCYLLADB-4519]`.
 
 ## Task 3 — move the java distributions into the library (T2)
 
