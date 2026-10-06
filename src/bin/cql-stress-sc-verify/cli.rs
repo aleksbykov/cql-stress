@@ -118,6 +118,11 @@ pub struct Cli {
 
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub report_interval: Duration,
+
+    /// Test only: with this probability a read returns the cells of the row's first read
+    /// instead, a stale read the invariants must catch (milestone 1 "can fail").
+    #[arg(long, hide = true, default_value_t = 0.0, value_parser = ratio)]
+    pub fault_stale_reads: f64,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,6 +292,10 @@ mod tests {
         assert_eq!(cli.bulk_read_consistency, BulkReadConsistency::Quorum);
         assert_eq!(cli.report_interval, Duration::from_secs(10));
         assert!(!cli.ssl);
+        assert_eq!(
+            cli.fault_stale_reads, 0.0,
+            "the fault is off unless asked for"
+        );
     }
 
     #[test]

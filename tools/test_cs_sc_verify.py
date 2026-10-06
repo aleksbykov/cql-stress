@@ -113,3 +113,26 @@ def run_verify_quiet(node, session, keyspace: str, tmp_path):
     for row in rows:
         check_file = (history / "sealed" / f"{row['file']}.jsonl").read_text()
         assert f'# key {row["key"]} pk {row["pk"]} gen "{row["gen"]}" ck 0' in check_file, row
+
+
+def run_stale_reads(node, session, keyspace: str, tmp_path):
+    """The test-only fault serves stale reads: the invariants must catch them, with evidence."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    result = sc_verify(node, profile, "--fault-stale-reads", "0.2", duration="15s")
+    assert result.returncode == 1, f"expected exit 1, got {result.returncode}"
+
+    violations = [json.loads(line[len("SCV "):]) for line in result.stdout.splitlines()
+                  if line.startswith('SCV {"t":"violation"')]
+    assert violations, "no SCV violation line"
+    assert {v["kind"] for v in violations} & {"INV-1", "INV-2"}, violations
+    end = [line for line in result.stdout.splitlines() if line.startswith('SCV {"t":"end"')]
+    assert end == ['SCV {"t":"end","exit":1}'], end
+
+    # The evidence is on disk: the archived check file holds the violating row.
+    history = tmp_path / "history"
+    first = violations[0]
+    archived = (history / first["archive"] / f"{first['archive'].split('/')[1]}.jsonl").read_text()
+    assert f'pk {first["pk"]} gen "{first["gen"]}"' in archived
+    rows = [json.loads(line) for line in (history / "rows.jsonl").read_text().splitlines()]
+    violated = [row for row in rows if row["verdict"] == "violation"]
+    assert violated and all(row["invariants"] == "violation" for row in violated)

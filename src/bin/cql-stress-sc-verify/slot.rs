@@ -252,6 +252,8 @@ struct Round {
     last_ok_ns: u64,
     max_gap_ns: u64,
     stop: Option<StopReason>,
+    /// What the row's first recorded read saw; `--fault-stale-reads` serves it again.
+    first_seen: Option<Vec<Seen>>,
 }
 
 impl Round {
@@ -349,6 +351,7 @@ async fn run_round(
         last_ok_ns: start_ns,
         max_gap_ns: 0,
         stop: None,
+        first_seen: None,
     });
 
     let clients = (0..checked.cli.clients_per_row)
@@ -491,7 +494,13 @@ async fn read(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: usi
     let mut guard = round.lock().unwrap();
     let round = &mut *guard;
     match result {
-        Ok(seen) => {
+        Ok(mut seen) => {
+            let fault = checked.cli.fault_stale_reads;
+            match &round.first_seen {
+                None => round.first_seen = Some(seen.clone()),
+                Some(first) if fault > 0.0 && random_bool(fault) => seen = first.clone(),
+                Some(_) => {}
+            }
             let violations = round.state.check_read(&floors, &seen);
             round.state.end_read(&seen);
             round.reads += 1;

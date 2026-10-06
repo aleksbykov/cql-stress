@@ -337,16 +337,17 @@ file, then rename) every `--report-interval` and at exit with `exit`. `main`'s c
 
 ## Task 16 — stale-read fault flag (T8)
 
-**Files:** Modify: `ops.rs`, `cli.rs`; Modify: `tools/test_cs_sc_verify.py`, `tools/cql-stress-cassandra-stress-ci.py`
+**Files:** Modify: `slot.rs` (it needs the row's memory), `cli.rs`; Modify: `tools/test_cs_sc_verify.py`, `tools/cql-stress-cassandra-stress-ci.py`
 
-**Internals:** hidden `--fault-stale-reads <p>`: with probability p, a read
-returns the cells of an earlier read of the same row.
+**Internals:** hidden `--fault-stale-reads <p>` (default 0): with probability p, a successful
+read is replaced by what the row's first recorded read saw, before it is checked and
+recorded, so the history holds what the "read returned".
 
-- [ ] Write pytest `run_stale_reads`: with the flag, `SCV violation` of INV-1 or INV-2 within one row, exit 1.
-- [ ] Run it and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify and the pytest.
-- [ ] Commit `test: inject stale reads to prove the invariants fire [SCYLLADB-4519]`.
+- [x] Write pytest `run_stale_reads`: with the flag, `SCV violation` of INV-1 or INV-2 within one row, exit 1.
+- [x] Run it and confirm the failure.
+- [x] Write the code.
+- [x] Run verify and the pytest. (15 s at p = 0.2: 58 of 64 rows violated, archived, exit 1, `SCV end` exit 1.)
+- [x] Commit `test: inject stale reads to prove the invariants fire [SCYLLADB-4519]`.
 
 **Checkpoint B** (human review): the 60 s compose run is clean; the fault flag gives exit 1.
 

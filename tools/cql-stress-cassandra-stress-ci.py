@@ -18,6 +18,7 @@ from test_cs_strong_consistency import (
 )
 from test_cs_sc_verify import run_schema as run_sc_verify_schema
 from test_cs_sc_verify import run_verify_quiet as run_sc_verify_quiet
+from test_cs_sc_verify import run_stale_reads as run_sc_verify_stale_reads
 
 
 # Utils for test cases
@@ -260,3 +261,10 @@ def test_strong_consistency_sc_verify_quiet(
         tmp_path):
     run_sc_verify_quiet(node=strong_consistency_node, session=strong_consistency_session,
                         keyspace=strong_consistency_keyspace, tmp_path=tmp_path)
+
+
+def test_strong_consistency_sc_verify_stale_reads(
+        strong_consistency_node, strong_consistency_session, strong_consistency_keyspace,
+        tmp_path):
+    run_sc_verify_stale_reads(node=strong_consistency_node, session=strong_consistency_session,
+                              keyspace=strong_consistency_keyspace, tmp_path=tmp_path)
