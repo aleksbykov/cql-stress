@@ -33,7 +33,8 @@ def sc_verify(node, profile: str, *args: str, duration="1s") -> subprocess.Compl
     """Runs a checked stream; its history goes next to the profile."""
     history = Path(profile).parent / "history"
     cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
-           "--mode", "verify", "--duration", duration, "--history-dir", str(history), *args]
+           "--mode", "verify", "--duration", duration, "--history-dir", str(history),
+           "--checker", "off", *args]
     print(" ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     print(result.stdout, result.stderr, sep="\n")
@@ -172,7 +173,7 @@ def run_both(node, session, keyspace: str, tmp_path):
     history = tmp_path / "history"
     cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
            "--mode", "both", "--duration", "20s", "--bulk-threads", "8",
-           "--report-interval", "5s", "--history-dir", str(history)]
+           "--report-interval", "5s", "--history-dir", str(history), "--checker", "off"]
     print(" ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     print(result.stdout, result.stderr, sep="\n")

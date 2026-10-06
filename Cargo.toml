@@ -109,6 +109,9 @@ strong-consistency = [
     "dep:serde",
     "dep:serde_json",
     "dep:serde_yaml",
+    # cql-stress-sc-verify runs porcupine_checker as a child process.
+    "tokio/process",
+    "tokio/io-util",
 ]
 
 [dev-dependencies]

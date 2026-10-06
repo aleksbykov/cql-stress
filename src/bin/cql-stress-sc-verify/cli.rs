@@ -95,9 +95,42 @@ pub struct Cli {
     pub check_rows: usize,
     #[arg(long, default_value = "5m", value_parser = parse_duration)]
     pub check_age: Duration,
-    /// Milestone 1 only writes check files; `on` arrives with the checker queue.
-    #[arg(long, value_enum, default_value_t = Checker::Off)]
+    /// Check sealed rows with porcupine_checker; `off` only writes the check files.
+    #[arg(long, value_enum, default_value_t = Checker::On)]
     pub checker: Checker,
+    #[arg(long, default_value = "/usr/local/bin/porcupine_checker")]
+    pub checker_bin: PathBuf,
+    #[arg(long, default_value_t = 2)]
+    pub checker_workers: usize,
+    /// A checker child running longer is killed; its unfinished rows are `unknown`.
+    #[arg(long, default_value = "600s", value_parser = parse_duration)]
+    pub checker_timeout: Duration,
+    /// Memory for one checker child, e.g. `4G` or `512M`.
+    #[arg(long, default_value = "4G", value_parser = parse_size)]
+    pub checker_mem: u64,
+    /// At the end of the run, how long the queued files may still be checked.
+    #[arg(long, default_value = "10m", value_parser = parse_duration)]
+    pub checker_deadline: Duration,
+    /// Check files waiting for a worker; when full, a file is archived unchecked.
+    #[arg(long, default_value_t = 256)]
+    pub queue_max: usize,
+    /// One canary, a deliberately corrupted history, every this many check files.
+    #[arg(long, default_value_t = 100)]
+    pub canary_every: u64,
+    /// The checker's time limit for one row.
+    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    pub key_timeout: Duration,
+    /// At most this many visualizations of illegal rows per check file.
+    #[arg(long, default_value_t = 3)]
+    pub max_viz: usize,
+    /// Read every retired row back at the end of the run.
+    #[arg(long, value_enum, default_value_t = Readback::On)]
+    pub readback: Readback,
+    /// The share of retired rows the read-back reads.
+    #[arg(long, default_value_t = 1.0, value_parser = ratio)]
+    pub readback_sample: f64,
+    #[arg(long, default_value_t = 64)]
+    pub readback_concurrency: usize,
 
     // Bulk (modes bulk and both).
     #[arg(long, value_enum, default_value_t = BulkOp::Mixed)]
@@ -140,6 +173,13 @@ pub enum CheckedConsistency {
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Checker {
+    On,
+    Off,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readback {
+    On,
     Off,
 }
 
@@ -184,6 +224,14 @@ impl Cli {
             ("--max-indeterminate", cli.max_indeterminate == 0),
             ("--sweep-retries", cli.sweep_retries == 0),
             ("--check-rows", cli.check_rows == 0),
+            ("--checker-workers", cli.checker_workers == 0),
+            ("--checker-timeout", cli.checker_timeout.is_zero()),
+            ("--checker-mem", cli.checker_mem == 0),
+            ("--queue-max", cli.queue_max == 0),
+            ("--canary-every", cli.canary_every == 0),
+            ("--key-timeout", cli.key_timeout.is_zero()),
+            ("--readback-sample", cli.readback_sample == 0.0),
+            ("--readback-concurrency", cli.readback_concurrency == 0),
         ] {
             anyhow::ensure!(!zero, "{name} must be greater than 0");
         }
@@ -244,6 +292,24 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(number * seconds))
 }
 
+/// `<number>[K|M|G]` bytes, in binary units.
+fn parse_size(s: &str) -> Result<u64> {
+    let (number, shift) = match s.strip_suffix(['K', 'M', 'G']) {
+        Some(number) => (
+            number,
+            10 * (1 + "KMG".find(&s[s.len() - 1..]).unwrap() as u32),
+        ),
+        None => (s, 0),
+    };
+    let number: u64 = number
+        .parse()
+        .with_context(|| format!("Invalid size {s:?}: use bytes, or a K, M or G suffix"))?;
+    number
+        .checked_shl(shift)
+        .filter(|bytes| bytes >> shift == number)
+        .with_context(|| format!("Size {s:?} is too large"))
+}
+
 fn ratio(s: &str) -> Result<f64> {
     let value: f64 = s.parse().with_context(|| format!("Invalid ratio {s:?}"))?;
     anyhow::ensure!((0.0..=1.0).contains(&value), "Ratio {s} is not in 0..1");
@@ -297,7 +363,24 @@ mod tests {
             (cli.check_rows, cli.check_age),
             (50, Duration::from_secs(300))
         );
-        assert_eq!(cli.checker, Checker::Off);
+        assert_eq!(cli.checker, Checker::On);
+        assert_eq!(
+            cli.checker_bin,
+            PathBuf::from("/usr/local/bin/porcupine_checker")
+        );
+        assert_eq!(
+            (cli.checker_workers, cli.queue_max, cli.max_viz),
+            (2, 256, 3)
+        );
+        assert_eq!(cli.checker_timeout, Duration::from_secs(600));
+        assert_eq!(cli.checker_mem, 4 << 30);
+        assert_eq!(cli.checker_deadline, Duration::from_secs(600));
+        assert_eq!(
+            (cli.canary_every, cli.key_timeout),
+            (100, Duration::from_secs(10))
+        );
+        assert_eq!(cli.readback, Readback::On);
+        assert_eq!((cli.readback_sample, cli.readback_concurrency), (1.0, 64));
         assert_eq!((cli.bulk_op, cli.bulk_read_ratio), (BulkOp::Mixed, 0.5));
         assert_eq!(cli.bulk_pop, "seq=1099511627776..1099522113535");
         assert_eq!(
@@ -319,7 +402,13 @@ mod tests {
             "--mode verify -n 10",
             "--mode both -n 10",
             "--mode verify",
-            "--duration 1m --checker on",
+            "--duration 1m --checker maybe",
+            "--duration 1m --checker-mem 4X",
+            "--duration 1m --checker-mem 0",
+            "--duration 1m --checker-workers 0",
+            "--duration 1m --queue-max 0",
+            "--duration 1m --readback-sample 0",
+            "--duration 1m --readback-sample 1.5",
             "--duration 1m --pop seq=5..1",
             "--duration 1m --read-ratio 1.5",
             "--duration 1x",
@@ -336,6 +425,9 @@ mod tests {
             assert!(parse(bad).is_err(), "{bad:?} must be rejected");
         }
         assert!(parse("--mode bulk -n 10").is_ok());
+        let cli = parse("--duration 1m --checker off --readback off --checker-mem 512M").unwrap();
+        assert_eq!((cli.checker, cli.readback), (Checker::Off, Readback::Off));
+        assert_eq!(cli.checker_mem, 512 << 20);
         // 10 × (30 s + 5 s + 10 × (1 s + 5 s)) = 950 s.
         assert!(parse("--duration 1m --ttl 950").is_ok());
         assert!(parse("--duration 1m --ttl 949").is_err());

@@ -431,11 +431,11 @@ use small fake checker scripts written into a temp dir; they need no Scylla.
 `--checker on`, start-up runs `<checker-bin>` on an empty v2 history and needs exit 2
 ("no input") rather than a spawn error; otherwise exit 2.
 
-- [ ] Write tests: the M2 defaults; `--checker-mem 4G` parses as bytes; bad sizes and zeros fail.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify (the pytests pass `--checker off` until task 22).
-- [ ] Commit `feat: add the sc-verify milestone 2 options [SCYLLADB-4519]`.
+- [x] Write tests: the M2 defaults; `--checker-mem 4G` parses as bytes; bad sizes and zeros fail.
+- [x] Run them and confirm the failure. (Compile errors; the probe's tests use fake checker scripts: good, wrong exit, hanging, missing.)
+- [x] Write the code.
+- [x] Run verify (the pytests pass `--checker off` until task 22). (Manual: no checker → exit 2 with the reason; the real checker → runs; `--mode bulk` never probes. `Cargo.toml`: the feature turns on `tokio/process` and `tokio/io-util`.)
+- [x] Commit `feat: add the sc-verify milestone 2 options [SCYLLADB-4519]`.
 
 ## Task 21 — run one check file in a child process (T21)
 

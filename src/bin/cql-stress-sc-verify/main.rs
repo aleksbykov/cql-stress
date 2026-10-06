@@ -5,6 +5,7 @@
 extern crate async_trait;
 
 mod bulk;
+mod checker;
 mod cli;
 mod history;
 mod invariants;
@@ -28,7 +29,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use bulk::{BulkFactory, BulkStats};
-use cli::{Cli, Mode};
+use cli::{Checker, Cli, Mode};
 use history::Recorder;
 use keys::GenMinter;
 use profile::Profile;
@@ -57,6 +58,12 @@ async fn main() -> Result<()> {
         }
     });
     let profile = Profile::load(&cli.profile).unwrap_or_else(|err| exit_setup_failure(err));
+    // The checked stream needs a working checker; bulk alone never starts one.
+    if cli.checker == Checker::On && cli.mode != Mode::Bulk {
+        checker::probe(&cli.checker_bin, checker::PROBE_TIMEOUT)
+            .await
+            .unwrap_or_else(|err| exit_setup_failure(err));
+    }
     // Built up front, so a bad certificate path fails before anything connects.
     let tls = cli
         .tls_context()
