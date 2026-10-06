@@ -223,7 +223,7 @@ impl Checked {
         }
     }
 
-    async fn mint(&self) -> RowKey {
+    pub async fn mint(&self) -> RowKey {
         let gen = loop {
             if let Some(gen) = self.gens.lock().unwrap().next(unix_ms()) {
                 break gen;
@@ -263,10 +263,12 @@ impl Round {
     }
 }
 
-/// Runs slot `slot` until the run is stopped, sending every sealed row to `sealed`.
+/// Runs slot `slot`, starting with the row `first` (checked absent at start-up), until the run
+/// is stopped, sending every sealed row to `sealed`.
 pub async fn run_slot(
     checked: Arc<Checked>,
     slot: usize,
+    first: RowKey,
     sealed: mpsc::UnboundedSender<SealedRow>,
 ) {
     let cli = &checked.cli;
@@ -289,17 +291,12 @@ pub async fn run_slot(
         })
     };
 
-    let mut first = true;
+    let mut next = Some(first);
     while !checked.is_stopped() {
-        let key = checked.mint().await;
-        if first {
-            first = false;
-            if !fresh_row_is_absent(&checked, &key).await {
-                checked.exit.raise(2);
-                checked.stop();
-                break;
-            }
-        }
+        let key = match next.take() {
+            Some(key) => key,
+            None => checked.mint().await,
+        };
         let row = run_round(&checked, slot, key, ticks.clone()).await;
         if sealed.send(row).is_err() {
             break;
@@ -309,7 +306,7 @@ pub async fn run_slot(
 }
 
 /// Start-up check 4 (spec §15.3): a freshly minted row must not exist yet.
-async fn fresh_row_is_absent(checked: &Checked, key: &RowKey) -> bool {
+pub async fn fresh_row_is_absent(checked: &Checked, key: &RowKey) -> bool {
     for _ in 0..checked.cli.sweep_retries.max(1) {
         match checked.statements.read(&checked.session, key).await {
             Ok(seen) if seen.iter().all(|cell| *cell == Seen::Null) => return true,

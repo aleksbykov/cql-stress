@@ -62,10 +62,6 @@ async fn main() -> Result<()> {
     let statements = ops::Statements::prepare(&session, &profile, cli.ttl)
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
-    println!(
-        "Start-up checks passed: {}.{} is strongly consistent and matches the profile",
-        profile.keyspace, profile.table
-    );
     if cli.mode != Mode::Verify {
         exit_setup_failure(anyhow::anyhow!(
             "--mode bulk and --mode both are not implemented yet; use --mode verify"
@@ -77,19 +73,7 @@ async fn main() -> Result<()> {
         .create();
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     let gens = GenMinter::new(now_ms).unwrap_or_else(|err| exit_setup_failure(err));
-    println!(
-        "Checked stream: {} slots of {} clients, pk {}, gen base {}",
-        cli.slots,
-        cli.clients_per_row,
-        cli.pop,
-        gens.base()
-    );
-    report::print(&Scv::Start {
-        mode: "verify",
-        pop: &cli.pop,
-        slots: cli.slots,
-        gen_base: gens.base(),
-    });
+    let gen_base = gens.base();
     let duration = cli.duration.expect("--mode verify requires --duration");
     let mut recorder = Recorder::new(
         &cli.history_dir,
@@ -107,9 +91,51 @@ async fn main() -> Result<()> {
         gens,
     ));
 
+    // Start-up check 4 (spec §15.3): every slot's first row is freshly minted and absent.
+    let mut first_rows = Vec::new();
+    for _ in 0..checked.cli.slots {
+        first_rows.push(checked.mint().await);
+    }
+    let absent = futures::future::join_all(
+        first_rows
+            .iter()
+            .map(|key| slot::fresh_row_is_absent(&checked, key)),
+    )
+    .await;
+    if absent.contains(&false) {
+        exit_setup_failure(anyhow::anyhow!(
+            "a freshly minted row is not absent; see above"
+        ));
+    }
+
+    println!(
+        "Start-up checks passed: {}.{} is strongly consistent and matches the profile",
+        profile.keyspace, profile.table
+    );
+    let cli = &checked.cli;
+    println!(
+        "Checked stream: {} slots of {} clients, pk {}, gen base {gen_base}",
+        cli.slots, cli.clients_per_row, cli.pop
+    );
+    report::print(&Scv::Start {
+        mode: "verify",
+        pop: &cli.pop,
+        slots: cli.slots,
+        gen_base,
+    });
+
     let (sealed_tx, mut sealed) = mpsc::unbounded_channel();
-    let slots: Vec<_> = (0..checked.cli.slots)
-        .map(|slot| tokio::spawn(slot::run_slot(checked.clone(), slot, sealed_tx.clone())))
+    let slots: Vec<_> = first_rows
+        .into_iter()
+        .enumerate()
+        .map(|(slot, first)| {
+            tokio::spawn(slot::run_slot(
+                checked.clone(),
+                slot,
+                first,
+                sealed_tx.clone(),
+            ))
+        })
         .collect();
     drop(sealed_tx);
     let stopper = {
