@@ -46,8 +46,8 @@ async fn main() -> Result<()> {
     startup::startup(&session, &profile, &cli)
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
-    // The slots' read; preparing it here also proves the checked statements are accepted.
-    ops::prepare_checked(&session, &profile.read_query())
+    // Every checked statement, prepared once; this also proves the cluster accepts them.
+    let _statements = ops::Statements::prepare(&session, &profile, cli.ttl)
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
     println!(

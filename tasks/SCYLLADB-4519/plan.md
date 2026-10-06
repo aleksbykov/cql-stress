@@ -251,7 +251,27 @@ for an indeterminate write; `gen` is a string; an undecodable cell is `-1`.
 - [x] Run verify.
 - [x] Commit `feat: mint row keys and write v2 history files [SCYLLADB-4519]`.
 
-## Task 13 — the slot loop (T6)
+## Task 13a — one checked operation (T6)
+
+**Files:** Modify: `src/bin/cql-stress-sc-verify/ops.rs`, `.../main.rs`
+
+**Internals:** `fn write_query(profile, mask, ttl)`: a full-row `INSERT` for all cells, a
+partial `UPDATE` otherwise, with `USING TTL n` when `ttl > 0`; `struct Statements` prepared
+once at start-up (the read and one write per non-empty mask, up to 255 with 8 cells);
+`write(session, key, mask, wid, unavailable_is_fail)` and `read(session, key) -> Vec<Seen>`
+(no row → all `Null`; strict `decode`), both returning `OpError { class: Failure, message }`.
+`main` prepares the `Statements` at start-up instead of only the read.
+
+- [x] Write tests: the four query shapes; against an ordinary keyspace (CI runs cargo tests
+  on the plain node): absent → all null, INSERT then partial UPDATE read back as the
+  expected wids, a foreign value → `Undecodable`.
+- [x] Run them and confirm the failure. (They failed to compile; after the code, binding the
+  UPDATE's key values first failed the DB test.)
+- [x] Write the code.
+- [x] Run verify.
+- [x] Commit `feat: execute checked reads and writes [SCYLLADB-4519]`.
+
+## Task 13 — the slot loop (T6; 13b in the log)
 
 **Files:** Create: `src/bin/cql-stress-sc-verify/slot.rs`; Modify: `main.rs`
 

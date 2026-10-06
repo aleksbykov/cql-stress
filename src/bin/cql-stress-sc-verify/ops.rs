@@ -10,10 +10,12 @@ use scylla::errors::{DbError, ExecutionError, RequestAttemptError};
 use scylla::policies::retry::FallthroughRetryPolicy;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::statement::Consistency;
-use scylla::value::CqlValue;
+use scylla::value::{CqlValue, Row};
 
 use crate::cli::CheckedConsistency;
-use crate::profile::CellType;
+use crate::invariants::Seen;
+use crate::keys::RowKey;
+use crate::profile::{CellType, Profile};
 
 /// The execution profile of the checked session (spec §8.3).
 ///
@@ -155,6 +157,162 @@ pub fn classify(op: OpKind, error: &ExecutionError, unavailable_is_fail: bool) -
             Failure::Fail
         }
         OpKind::Write => Failure::Indeterminate,
+    }
+}
+
+/// A failed checked operation: its class (spec §9) and the driver's message.
+#[derive(Debug)]
+pub struct OpError {
+    pub class: Failure,
+    pub message: String,
+}
+
+impl OpError {
+    fn new(op: OpKind, error: &ExecutionError, unavailable_is_fail: bool) -> Self {
+        Self {
+            class: classify(op, error, unavailable_is_fail),
+            message: error.to_string(),
+        }
+    }
+
+    /// A response this tool cannot read: a bug in the tool or the profile.
+    fn workload(error: impl std::fmt::Display) -> Self {
+        Self {
+            class: Failure::WorkloadError,
+            message: error.to_string(),
+        }
+    }
+}
+
+/// The write that sets the cells in `mask`: a full-row `INSERT` for all of them, a partial
+/// `UPDATE` otherwise (spec §7.2).
+fn write_query(profile: &Profile, mask: u8, ttl: u32) -> String {
+    let table = format!("{}.{}", profile.keyspace, profile.table);
+    let cells: Vec<String> = (0..profile.cells.len())
+        .filter(|cell| mask & (1 << cell) != 0)
+        .map(|cell| format!("c{cell}"))
+        .collect();
+    let all = cells.len() == profile.cells.len();
+    let using_ttl = |sep: &str| {
+        if ttl > 0 {
+            format!("{sep}USING TTL {ttl}")
+        } else {
+            String::new()
+        }
+    };
+    if all {
+        let marks = vec!["?"; cells.len() + 3].join(", ");
+        format!(
+            "INSERT INTO {table} (pk, gen, ck, {}) VALUES ({marks}){}",
+            cells.join(", "),
+            using_ttl(" ")
+        )
+    } else {
+        let sets: Vec<String> = cells.iter().map(|cell| format!("{cell} = ?")).collect();
+        format!(
+            "UPDATE {table}{} SET {} WHERE pk = ? AND gen = ? AND ck = ?",
+            using_ttl(" "),
+            sets.join(", ")
+        )
+    }
+}
+
+/// The checked statements, prepared once at start-up: the read, and one write per cell mask.
+pub struct Statements {
+    read: PreparedStatement,
+    /// `writes[mask]`; index 0 is unused.
+    writes: Vec<Option<PreparedStatement>>,
+    cells: Vec<CellType>,
+    text_size: usize,
+    blob_size: usize,
+}
+
+impl Statements {
+    pub async fn prepare(session: &Session, profile: &Profile, ttl: u32) -> Result<Self> {
+        let read = prepare_checked(session, &profile.read_query()).await?;
+        let mut writes = vec![None];
+        for mask in 1..1u16 << profile.cells.len() {
+            let query = write_query(profile, mask as u8, ttl);
+            writes.push(Some(prepare_checked(session, &query).await?));
+        }
+        Ok(Self {
+            read,
+            writes,
+            cells: profile.cells.clone(),
+            text_size: profile.text_size,
+            blob_size: profile.blob_size,
+        })
+    }
+
+    /// Writes `wid` into the cells of `mask`.
+    pub async fn write(
+        &self,
+        session: &Session,
+        key: &RowKey,
+        mask: u8,
+        wid: u64,
+        unavailable_is_fail: bool,
+    ) -> Result<(), OpError> {
+        let mut cells = Vec::new();
+        for (cell, &cell_type) in self.cells.iter().enumerate() {
+            if mask & (1 << cell) != 0 {
+                cells
+                    .push(encode(cell_type, wid, self.size(cell_type)).map_err(OpError::workload)?);
+            }
+        }
+        let key_values = [
+            CqlValue::BigInt(key.pk),
+            CqlValue::BigInt(key.gen),
+            CqlValue::Int(key.ck),
+        ];
+        let values: Vec<CqlValue> = if cells.len() == self.cells.len() {
+            key_values.into_iter().chain(cells).collect()
+        } else {
+            cells.into_iter().chain(key_values).collect()
+        };
+        let statement = self.writes[mask as usize]
+            .as_ref()
+            .expect("a statement for every non-empty mask");
+        session
+            .execute_unpaged(statement, values)
+            .await
+            .map(|_| ())
+            .map_err(|error| OpError::new(OpKind::Write, &error, unavailable_is_fail))
+    }
+
+    /// Reads every cell of the row; an absent row reads as all null.
+    pub async fn read(&self, session: &Session, key: &RowKey) -> Result<Vec<Seen>, OpError> {
+        let result = session
+            .execute_unpaged(&self.read, (key.pk, key.gen, key.ck))
+            .await
+            .map_err(|error| OpError::new(OpKind::Read, &error, false))?;
+        let row = result
+            .into_rows_result()
+            .map_err(OpError::workload)?
+            .maybe_first_row::<Row>()
+            .map_err(OpError::workload)?;
+        let Some(row) = row else {
+            return Ok(vec![Seen::Null; self.cells.len()]);
+        };
+        Ok(self
+            .cells
+            .iter()
+            .zip(row.columns)
+            .map(|(&cell_type, value)| match value {
+                None => Seen::Null,
+                Some(value) => match decode(cell_type, self.size(cell_type), &value) {
+                    Ok(wid) => Seen::Wid(wid),
+                    Err(_) => Seen::Undecodable,
+                },
+            })
+            .collect())
+    }
+
+    fn size(&self, cell_type: CellType) -> usize {
+        match cell_type {
+            CellType::Text => self.text_size,
+            _ => self.blob_size,
+        }
     }
 }
 
@@ -361,6 +519,104 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    fn test_profile(keyspace: &str) -> Profile {
+        Profile::parse(&format!(
+            "{{keyspace: {keyspace}, replication_factor: 1, tablets_initial: 1, table: reg, \
+             cells: [bigint, text, blob], text_size: 32, blob_size: 64}}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn write_queries_test() {
+        let profile = test_profile("ks");
+        assert_eq!(
+            write_query(&profile, 0b111, 0),
+            "INSERT INTO ks.reg (pk, gen, ck, c0, c1, c2) VALUES (?, ?, ?, ?, ?, ?)"
+        );
+        assert_eq!(
+            write_query(&profile, 0b101, 0),
+            "UPDATE ks.reg SET c0 = ?, c2 = ? WHERE pk = ? AND gen = ? AND ck = ?"
+        );
+        assert_eq!(
+            write_query(&profile, 0b111, 60),
+            "INSERT INTO ks.reg (pk, gen, ck, c0, c1, c2) VALUES (?, ?, ?, ?, ?, ?) USING TTL 60"
+        );
+        assert_eq!(
+            write_query(&profile, 0b010, 60),
+            "UPDATE ks.reg USING TTL 60 SET c1 = ? WHERE pk = ? AND gen = ? AND ck = ?"
+        );
+    }
+
+    /// Writes and reads through the prepared statements. An ordinary keyspace is enough for
+    /// binding and decoding, and CI runs these tests against an ordinary node.
+    #[tokio::test]
+    async fn statements_write_and_read_test() {
+        let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_owned());
+        let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+        let keyspace = "sc_verify_ops_test";
+        let profile = test_profile(keyspace);
+        session
+            .query_unpaged(format!("DROP KEYSPACE IF EXISTS {keyspace}"), ())
+            .await
+            .unwrap();
+        session
+            .query_unpaged(
+                format!(
+                    "CREATE KEYSPACE {keyspace} WITH replication = \
+                     {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}}"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+        session
+            .query_unpaged(profile.table_ddl("reg"), ())
+            .await
+            .unwrap();
+
+        let statements = Statements::prepare(&session, &profile, 0).await.unwrap();
+        let key = RowKey {
+            pk: 1,
+            gen: 1 << 60,
+            ck: 0,
+        };
+        assert_eq!(
+            statements.read(&session, &key).await.unwrap(),
+            [Seen::Null; 3]
+        );
+
+        statements
+            .write(&session, &key, 0b111, 1, false)
+            .await
+            .unwrap();
+        statements
+            .write(&session, &key, 0b010, 2, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            statements.read(&session, &key).await.unwrap(),
+            [Seen::Wid(1), Seen::Wid(2), Seen::Wid(1)]
+        );
+
+        // A value no write of this tool produced does not decode.
+        session
+            .query_unpaged(
+                format!("UPDATE {keyspace}.reg SET c1 = 'x' WHERE pk = 1 AND gen = ? AND ck = 0"),
+                (key.gen,),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            statements.read(&session, &key).await.unwrap(),
+            [Seen::Wid(1), Seen::Undecodable, Seen::Wid(1)]
+        );
+        session
+            .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+            .await
+            .unwrap();
     }
 
     /// The session's statements really get the profile, and are not idempotent.
