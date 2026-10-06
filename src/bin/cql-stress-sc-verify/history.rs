@@ -86,7 +86,8 @@ impl CheckFile {
             self.out,
             "# key {key} pk {} gen \"{}\" ck {}",
             row.pk, row.gen, row.ck
-        )?;
+        )
+        .with_context(|| format!("Failed to write check file {}", self.path.display()))?;
         for op in ops {
             let id = self.next_id;
             self.next_id += 1;
@@ -155,6 +156,10 @@ impl CheckFile {
             }
         }
         self.rows += 1;
+        // Flushed per row: rows.jsonl, written next, must never name a row a kill could lose.
+        self.out
+            .flush()
+            .with_context(|| format!("Failed to write check file {}", self.path.display()))?;
         Ok(key)
     }
 
@@ -167,9 +172,12 @@ impl CheckFile {
     }
 
     fn write(&mut self, line: &Line) -> Result<()> {
-        serde_json::to_writer(&mut self.out, line)?;
-        self.out.write_all(b"\n")?;
-        Ok(())
+        let result = (|| -> Result<()> {
+            serde_json::to_writer(&mut self.out, line)?;
+            self.out.write_all(b"\n")?;
+            Ok(())
+        })();
+        result.with_context(|| format!("Failed to write check file {}", self.path.display()))
     }
 }
 
@@ -214,10 +222,12 @@ impl Recorder {
         let sealed = dir.join("sealed");
         std::fs::create_dir_all(&sealed)
             .with_context(|| format!("Failed to create {}", sealed.display()))?;
-        std::fs::create_dir_all(dir.join("archive"))?;
+        std::fs::create_dir_all(dir.join("archive"))
+            .with_context(|| format!("Failed to create {}", dir.join("archive").display()))?;
         // A restarted process continues the numbering, so it never overwrites the evidence
         // of the previous one.
-        let next_seq = std::fs::read_dir(&sealed)?
+        let next_seq = std::fs::read_dir(&sealed)
+            .with_context(|| format!("Failed to list {}", sealed.display()))?
             .filter_map(|entry| {
                 entry
                     .ok()?
@@ -281,9 +291,14 @@ impl Recorder {
             // Milestone 1 runs no checker: a row is a violation or unchecked (spec §4.3).
             verdict: if violated { "violation" } else { "unchecked" },
         };
-        serde_json::to_writer(&mut self.rows, &line)?;
-        self.rows.write_all(b"\n")?;
-        self.rows.flush()?;
+        let rows = &mut self.rows;
+        let result = (|| -> Result<()> {
+            serde_json::to_writer(&mut *rows, &line)?;
+            rows.write_all(b"\n")?;
+            rows.flush()?;
+            Ok(())
+        })();
+        result.context("Failed to write rows.jsonl")?;
 
         if violated {
             return self.close(true);
@@ -297,7 +312,7 @@ impl Recorder {
     /// Closes the open check file and flushes `rows.jsonl`.
     pub fn finish(mut self) -> Result<()> {
         self.close(false)?;
-        self.rows.flush()?;
+        self.rows.flush().context("Failed to write rows.jsonl")?;
         Ok(())
     }
 
@@ -311,7 +326,8 @@ impl Recorder {
         }
         let relative = format!("archive/{seq}");
         let dir = self.dir.join(&relative);
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create {}", dir.display()))?;
         std::fs::copy(&path, dir.join(format!("{seq}.jsonl")))
             .with_context(|| format!("Failed to archive {}", path.display()))?;
         Ok(Some(relative))
@@ -380,7 +396,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sc-verify-recorder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut recorder = Recorder::new(&dir, 1, 2, Duration::from_secs(300)).unwrap();
-        for pk in 0..3 {
+        recorder.record(&sealed(0, 0)).unwrap();
+        // On disk before the file closes: rows.jsonl never names a row that a kill could lose.
+        assert_eq!(
+            lines(&dir.join("sealed/0.jsonl")).len(),
+            5,
+            "the key line and 2 reads"
+        );
+        for pk in 1..3 {
             recorder.record(&sealed(pk, 0)).unwrap();
         }
         recorder.finish().unwrap();
