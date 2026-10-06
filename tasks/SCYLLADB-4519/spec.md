@@ -323,5 +323,6 @@ left to T25.
 - `stats` lines cover one `--report-interval`; latencies are p99 of successful operations; `sched_delay_p99_ms` is how late the slots' burst ticks ran. (build)
 - In `rows.jsonl`, `errors` counts failed reads, `fail` writes and workload errors; indeterminate writes are counted only in `writes_indet`. (review)
 - **M2:** `--checker on` is the default. The canary corrupts the first read's first cell to the row's highest issued wid + 1, which no write produced, so the check fails at that read and costs almost nothing. (spec)
+- **M2:** with `--checker on`, a row's `rows.jsonl` line is written when its file has been checked. A kill loses the lines of rows whose file was still queued (their histories stay in `sealed/`), so after a kill `rows.jsonl` is not a complete list; at a normal end every row gets a line (`skipped` past `--checker-deadline`). (spec)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)

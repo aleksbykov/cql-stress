@@ -400,6 +400,26 @@ The same rules apply. Tasks 20–27 map to T21–T24 of the tracking list. New c
 `checker.rs` and `readback.rs` under `src/bin/cql-stress-sc-verify/`. Child-process tests
 use small fake checker scripts written into a temp dir; they need no Scylla.
 
+## Amendments from the review before code (advisor, 2026-10-06)
+
+- Task 20: the start-up probe gets its own short timeout (a timeout counts as "cannot
+  run"), and runs only for `verify` and `both`; `--mode bulk` never spawns a checker. The
+  pytest helper passes `--checker off` until task 22 brings the binary in. Every fake checker
+  exits 2 on empty input.
+- Task 21: `GOMEMLIMIT` is the byte count (Go does not read `4G`); `RLIMIT_DATA` is 1.25 ×
+  `--checker-mem`, so the Go GC can act before the hard limit kills the child.
+- Task 22: the queue is a bounded `tokio::sync::mpsc` of (file, pending row lines);
+  `try_send` failing *is* "queue full → skipped". Workers send verdicts back on a second
+  channel, a third `select!` arm in `main`. The recorder stays single-owner. A check file
+  holding a row with an invariant violation is never deleted, whatever the checker says.
+  Tests use short `--checker-timeout`/`--checker-deadline` values, and add `--queue-max 1`
+  with a hanging checker → `SCV skipped` and `skipped` verdicts. CI: the
+  `strong-consistency-tests` job copies `porcupine_checker` out of the pinned PV image,
+  whose tag is defined once, in the Dockerfile's `CHECKER_IMAGE` default.
+- Task 26: `COPY --from` does not expand an `ARG`; the shape is `FROM ${CHECKER_IMAGE} AS
+  checker` then `COPY --from=checker`. It is tried on a scratch Dockerfile first, including
+  the ordinary image, which must not get the checker.
+
 ## Task 20 — M2 command line and the checker start-up check (T21)
 
 **Files:** Modify: `cli.rs`, `main.rs`
