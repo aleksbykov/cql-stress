@@ -22,8 +22,10 @@ use crate::profile::{CellType, Profile};
 /// A strongly consistent write carries no deduplication token, so a write sent twice is
 /// applied twice (spec F8), and one recorded write would become two applied ones. Nothing on
 /// this path may resend a request: the retry policy never retries and there is no
-/// speculative execution. The driver itself only moves to the next node without asking the
-/// policy when it cannot get a connection, before anything was sent.
+/// speculative execution. The driver itself resends without asking the policy only when
+/// nothing ran: it moves to the next node when it cannot get a connection, before anything was
+/// sent, and it re-prepares and resends after an `Unprepared` error, which the server raises
+/// instead of running the statement.
 pub fn checked_profile(
     consistency: CheckedConsistency,
     request_timeout: Duration,

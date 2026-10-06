@@ -54,7 +54,9 @@ impl Budget {
     }
 
     fn take(&mut self, tick: u64, burst_ops: u64) -> bool {
-        if tick != self.tick {
+        // Only a newer tick refills: a client may have read the tick just before another one
+        // moved the budget on.
+        if tick > self.tick {
             self.tick = tick;
             self.left = burst_ops;
         }
@@ -247,6 +249,8 @@ struct Round {
     reads: u64,
     writes_ok: u64,
     writes_indet: u64,
+    /// Failed operations other than indeterminate writes, which `writes_indet` counts: failed
+    /// reads, `fail` writes and workload errors.
     errors: u64,
     violations: Vec<Detected>,
     last_ok_ns: u64,
@@ -452,18 +456,21 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
             checked.stats.write(Duration::from_nanos(end_ns - start_ns));
         }
         Err(error) => {
-            round.errors += 1;
             match error.class {
                 Failure::Indeterminate => {
                     round.state.end_write(wid, WriteEnd::Indeterminate);
                     round.writes_indet += 1;
                     checked.stats.write_indeterminate();
                 }
-                Failure::Fail => round.state.end_write(wid, WriteEnd::Fail(end_ns)),
+                Failure::Fail => {
+                    round.state.end_write(wid, WriteEnd::Fail(end_ns));
+                    round.errors += 1;
+                }
                 Failure::WorkloadError | Failure::ReadFailed => {
                     // Rejected outright: never recorded. Burned, so a cell showing it is a
                     // phantom.
                     round.state.end_write(wid, WriteEnd::Fail(end_ns));
+                    round.errors += 1;
                     drop(round);
                     checked.workload_error(&error);
                     return;
@@ -577,6 +584,23 @@ mod tests {
         assert_eq!(
             taken, 17,
             "one left from tick 9 is gone; tick 10 gives a full 16"
+        );
+    }
+
+    /// A client that read the tick before another client moved the budget on must not take
+    /// it back to the older tick, which would refill it and double the burst.
+    #[test]
+    fn budget_never_goes_back_to_an_older_tick_test() {
+        let mut budget = Budget::new(1);
+        let taken = [2, 1]
+            .iter()
+            .cycle()
+            .take(64)
+            .filter(|&&tick| budget.take(tick, 16))
+            .count();
+        assert_eq!(
+            taken, 16,
+            "one burst, whatever order the clients saw the ticks in"
         );
     }
 

@@ -231,5 +231,6 @@ files and the `archive/` layout these need, and the CLI leaves room for
 - `--ttl` above 0 must cover 10 rounds of the longest possible length: `max_gen_duration + request_timeout + sweep_retries × (sweep_backoff + request_timeout)` (§7.4). (build)
 - The `SCV violation` line is printed when the row seals, once its check file is in `archive/<seq>/`, so SCT can copy the evidence before it raises the event; `wall_ms` says when the read exposed the violation, so SCT still places it next to the nemesis that caused it. A human-readable line is printed at detection. (build)
 - `stats` lines cover one `--report-interval`; latencies are p99 of successful operations; `sched_delay_p99_ms` is how late the slots' burst ticks ran. (build)
+- In `rows.jsonl`, `errors` counts failed reads, `fail` writes and workload errors; indeterminate writes are counted only in `writes_indet`. (review)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)
