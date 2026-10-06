@@ -292,4 +292,16 @@ mod tests {
         assert!(message.contains("keyspace1"), "{message}");
         assert!(message.contains("diagnosis here"), "{message}");
     }
+
+    /// The two answers `diagnose_v2` gives without asking any node: nothing to say without
+    /// nodes, and a TLS run is told why its nodes were not asked rather than probed in
+    /// plaintext.
+    #[tokio::test]
+    async fn diagnose_v2_without_probing_test() {
+        assert_eq!(diagnose_v2(&[], false).await, "");
+
+        let tls = diagnose_v2(&[String::from("127.0.0.1")], true).await;
+        assert!(tls.contains("the probe speaks plaintext CQL"), "{tls}");
+        assert!(tls.contains("this run uses TLS"), "{tls}");
+    }
 }
