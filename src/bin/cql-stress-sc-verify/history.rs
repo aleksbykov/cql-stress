@@ -344,6 +344,8 @@ mod tests {
     use crate::invariants::{Inv, Seen, Violation, WriteStatus};
     use crate::slot::{Detected, StopReason};
 
+    /// The v2 contract with porcupine_validator, which keeps a byte-for-byte copy as
+    /// `testdata/v2_cql_stress_golden.jsonl` and checks it: change both together.
     const GOLDEN: &str = include_str!("history_test.jsonl");
 
     fn sealed(pk: i64, violations: usize) -> SealedRow {
