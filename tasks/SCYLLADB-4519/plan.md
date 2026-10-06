@@ -481,18 +481,21 @@ what is left is `skipped`. `stats` gains `queue`; `report.json` gains checker to
 
 **Files:** Modify: `checker.rs`, `history.rs`, `main.rs`, `report.rs`; Modify: the pytest files
 
-**Internals:** every `--canary-every` closed files, the first row of the file is copied into
-`sealed/canary-<n>.jsonl` with the first read's first cell set to the row's highest wid + 1;
+**Internals:** `history::make_canary(text)` (text-level: the first row that has a read, as key
+0, its earliest read's first cell set to the row's highest wid + 1, every other line
+unchanged); `main`'s `Checking` struct (queue, pending files, pending canaries, file count)
+with `submit`, `verdicts`, `drain`; canaries are queued under `CANARY_SEQ + n` into
+`sealed/canary-<n>.jsonl`, checked into `archive/canary-<n>/`;
 queued like any file; its result is never counted in `rows.jsonl`; not `illegal` →
 `SCV canary` with the result, `verifier-broken`, exit 1.
 
-- [ ] Write tests: the canary file differs from the row's history only in that cell; pytest
+- [x] Write tests: the canary file differs from the row's history only in that cell; pytest
       `--canary-every 1 --check-age 10s` for 60 s → every canary `illegal`; with a fake
       checker that answers `ok` to everything → exit 1, `verifier-broken`.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify and the pytests.
-- [ ] Commit `feat: prove the checker still rejects a corrupted history [SCYLLADB-4519]`.
+- [x] Run them and confirm the failure. (The unit test failed to compile first; the pytests came after the code. Accepting a canary answered `ok` makes the broken-checker test fail.)
+- [x] Write the code.
+- [x] Run verify and the pytests. (60 s, canary every file: 160 rows `ok`, 5 canaries `illegal`; the lenient checker: 2 canaries `ok` → `verifier-broken`, exit 1, kept in `archive/canary-*`.)
+- [x] Commit `feat: prove the checker still rejects a corrupted history [SCYLLADB-4519]`.
 
 ## Task 24 — the expected state at seal (T23)
 

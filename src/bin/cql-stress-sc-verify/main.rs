@@ -17,6 +17,7 @@ mod slot;
 mod startup;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -125,8 +126,8 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
         with_checker,
     )
     .unwrap_or_else(|err| exit_setup_failure(err));
-    let mut queue = with_checker.then(|| {
-        CheckQueue::start(
+    let mut checking = with_checker.then(|| Checking {
+        queue: CheckQueue::start(
             CheckerConfig {
                 bin: cli.checker_bin.clone(),
                 timeout: cli.checker_timeout,
@@ -136,10 +137,11 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
             },
             cli.checker_workers,
             cli.queue_max,
-        )
+        ),
+        pending: HashMap::new(),
+        canaries: HashMap::new(),
+        files: 0,
     });
-    // Closed check files waiting for their verdicts, by sequence number.
-    let mut pending: HashMap<u64, ClosedFile> = HashMap::new();
     let checked = Arc::new(Checked::new(
         Arc::new(session),
         statements,
@@ -223,13 +225,15 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
         tokio::select! {
             row = sealed.recv() => {
                 let Some(row) = row else { break };
-                if let Some(closed) = record(&checked, &mut recorder, &mut totals, row) {
-                    submit(&checked, queue.as_ref(), &mut pending, &mut recorder, &mut totals, closed);
+                if let (Some(closed), Some(checking)) =
+                    (record(&checked, &mut recorder, &mut totals, row), checking.as_mut())
+                {
+                    checking.submit(&checked, &mut recorder, &mut totals, closed);
                 }
             }
-            Some((seq, verdicts)) = next_verdicts(&mut queue) => {
-                if let Some(closed) = pending.remove(&seq) {
-                    file_verdicts(&checked, &mut recorder, &mut totals, closed, &verdicts);
+            Some((seq, verdicts)) = next_verdicts(&mut checking) => {
+                if let Some(checking) = checking.as_mut() {
+                    checking.verdicts(&checked, &mut recorder, &mut totals, seq, verdicts);
                 }
             }
             _ = reports.tick() => {
@@ -238,7 +242,7 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
                 if let Some(stats) = &bulk_stats {
                     interval.bulk_ops_s = stats.take_interval() as f64 / elapsed.as_secs_f64();
                 }
-                interval.queue = queue.as_ref().map_or(0, CheckQueue::waiting);
+                interval.queue = checking.as_ref().map_or(0, |checking| checking.queue.waiting());
                 last_report = Instant::now();
                 report::print(&Scv::Stats(interval));
                 write_report(&checked, bulk_stats.as_deref(), &mut totals, &history_dir, None);
@@ -246,14 +250,11 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
         }
     }
     match recorder.finish() {
-        Ok(Some(closed)) => submit(
-            &checked,
-            queue.as_ref(),
-            &mut pending,
-            &mut recorder,
-            &mut totals,
-            closed,
-        ),
+        Ok(Some(closed)) => {
+            if let Some(checking) = checking.as_mut() {
+                checking.submit(&checked, &mut recorder, &mut totals, closed);
+            }
+        }
         Ok(None) => {}
         Err(err) => {
             eprintln!("error: failed to close the history files: {err:#}");
@@ -273,28 +274,8 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
             checked.exit.raise(3);
         }
     }
-    // The checker gets until --checker-deadline for what is queued; the rest is skipped.
-    if let Some(queue) = queue.as_mut() {
-        queue.close();
-        let deadline = tokio::time::sleep(checked.cli.checker_deadline);
-        tokio::pin!(deadline);
-        while !pending.is_empty() {
-            tokio::select! {
-                result = queue.next() => {
-                    let Some((seq, verdicts)) = result else { break };
-                    if let Some(closed) = pending.remove(&seq) {
-                        file_verdicts(&checked, &mut recorder, &mut totals, closed, &verdicts);
-                    }
-                }
-                _ = &mut deadline => break,
-            }
-        }
-        queue.abort();
-        let mut left: Vec<_> = pending.drain().map(|(_, closed)| closed).collect();
-        left.sort_by_key(|closed| closed.seq);
-        for closed in left {
-            skip(&checked, &mut recorder, &mut totals, closed);
-        }
+    if let Some(checking) = checking.as_mut() {
+        checking.drain(&checked, &mut recorder, &mut totals).await;
     }
     if totals.violations > 0 {
         checked.exit.raise(1);
@@ -462,38 +443,160 @@ fn record(
 }
 
 /// The next checked file, or never when the checker is off.
-async fn next_verdicts(queue: &mut Option<CheckQueue>) -> Option<(u64, FileVerdicts)> {
-    match queue {
-        Some(queue) => queue.next().await,
+async fn next_verdicts(checking: &mut Option<Checking>) -> Option<(u64, FileVerdicts)> {
+    match checking {
+        Some(checking) => checking.queue.next().await,
         None => std::future::pending().await,
     }
 }
 
-/// Queues a closed check file; a full queue never waits: the file is skipped.
-fn submit(
-    checked: &Checked,
-    queue: Option<&CheckQueue>,
-    pending: &mut HashMap<u64, ClosedFile>,
-    recorder: &mut Recorder,
-    totals: &mut Report,
-    closed: ClosedFile,
-) {
-    let Some(queue) = queue else { return };
-    let job = Job {
-        seq: closed.seq,
-        path: closed.path.clone(),
-        rows: closed.rows.len(),
-        archive_dir: checked
-            .cli
-            .history_dir
-            .join(format!("archive/{}", closed.seq)),
-    };
-    match queue.submit(job) {
-        Ok(()) => {
-            pending.insert(closed.seq, closed);
+/// Canaries are queued under sequence numbers from here on, apart from the check files.
+const CANARY_SEQ: u64 = 1 << 62;
+
+/// The checker side of a run (`--checker on`): the queue, and what waits for verdicts.
+struct Checking {
+    queue: CheckQueue,
+    /// Closed check files, by sequence number.
+    pending: HashMap<u64, ClosedFile>,
+    /// Canary files, by their queue sequence number.
+    canaries: HashMap<u64, PathBuf>,
+    /// Check files closed so far.
+    files: u64,
+}
+
+impl Checking {
+    /// Queues a closed check file; a full queue never waits: the file is skipped. Every
+    /// `--canary-every` files, a canary made from this one goes in too.
+    fn submit(
+        &mut self,
+        checked: &Checked,
+        recorder: &mut Recorder,
+        totals: &mut Report,
+        closed: ClosedFile,
+    ) {
+        self.files += 1;
+        let canary = (self.files % checked.cli.canary_every == 0)
+            .then(|| std::fs::read_to_string(&closed.path).ok())
+            .flatten()
+            .and_then(|text| history::make_canary(&text));
+
+        let job = Job {
+            seq: closed.seq,
+            path: closed.path.clone(),
+            rows: closed.rows.len(),
+            archive_dir: checked
+                .cli
+                .history_dir
+                .join(format!("archive/{}", closed.seq)),
+        };
+        match self.queue.submit(job) {
+            Ok(()) => {
+                self.pending.insert(closed.seq, closed);
+            }
+            Err(_) => skip(checked, recorder, totals, closed),
         }
-        Err(_) => skip(checked, recorder, totals, closed),
+
+        if let Some(canary) = canary {
+            let n = self.files / checked.cli.canary_every;
+            let path = checked
+                .cli
+                .history_dir
+                .join(format!("sealed/canary-{n}.jsonl"));
+            if let Err(err) = std::fs::write(&path, canary) {
+                tracing::warn!("failed to write canary {}: {err}", path.display());
+                return;
+            }
+            let job = Job {
+                seq: CANARY_SEQ + n,
+                path: path.clone(),
+                rows: 1,
+                archive_dir: checked.cli.history_dir.join(format!("archive/canary-{n}")),
+            };
+            match self.queue.submit(job) {
+                Ok(()) => {
+                    self.canaries.insert(CANARY_SEQ + n, path);
+                }
+                Err(_) => {
+                    totals.canaries_skipped += 1;
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
     }
+
+    fn verdicts(
+        &mut self,
+        checked: &Checked,
+        recorder: &mut Recorder,
+        totals: &mut Report,
+        seq: u64,
+        verdicts: FileVerdicts,
+    ) {
+        if let Some(path) = self.canaries.remove(&seq) {
+            canary_verdict(checked, totals, seq - CANARY_SEQ, &path, &verdicts);
+        } else if let Some(closed) = self.pending.remove(&seq) {
+            file_verdicts(checked, recorder, totals, closed, &verdicts);
+        }
+    }
+
+    /// The end of the run: the checker gets until `--checker-deadline` for what is queued;
+    /// files left are skipped, canaries left are dropped.
+    async fn drain(&mut self, checked: &Checked, recorder: &mut Recorder, totals: &mut Report) {
+        self.queue.close();
+        let deadline = tokio::time::sleep(checked.cli.checker_deadline);
+        tokio::pin!(deadline);
+        while !self.pending.is_empty() || !self.canaries.is_empty() {
+            tokio::select! {
+                result = self.queue.next() => {
+                    let Some((seq, verdicts)) = result else { break };
+                    self.verdicts(checked, recorder, totals, seq, verdicts);
+                }
+                _ = &mut deadline => break,
+            }
+        }
+        self.queue.abort();
+        let mut left: Vec<_> = self.pending.drain().map(|(_, closed)| closed).collect();
+        left.sort_by_key(|closed| closed.seq);
+        for closed in left {
+            skip(checked, recorder, totals, closed);
+        }
+        for (_, path) in self.canaries.drain() {
+            totals.canaries_skipped += 1;
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// A canary must come back `illegal`. Anything else means the checker can no longer reject
+/// a known-bad history, so none of its `ok`s can be trusted: `verifier-broken`, exit 1.
+fn canary_verdict(
+    checked: &Checked,
+    totals: &mut Report,
+    n: u64,
+    path: &Path,
+    verdicts: &FileVerdicts,
+) {
+    let archive = checked.cli.history_dir.join(format!("archive/canary-{n}"));
+    let result = match verdicts.per_key.first() {
+        Some(RowResult::Illegal) => "illegal",
+        Some(RowResult::Ok) => "ok",
+        _ => "unknown",
+    };
+    report::print(&Scv::Canary { result });
+    if result == "illegal" {
+        totals.canaries_ok += 1;
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(&archive);
+        return;
+    }
+    totals.canaries_failed += 1;
+    eprintln!(
+        "error: verifier-broken: the checker answered {result} to canary {n}, a history no \
+         order can explain; it cannot be trusted to reject a real violation"
+    );
+    checked.exit.raise(1);
+    let _ = std::fs::create_dir_all(&archive);
+    let _ = std::fs::rename(path, archive.join(format!("canary-{n}.jsonl")));
 }
 
 /// Writes the rows' final lines; deletes a file whose rows were all ok, archives any other.

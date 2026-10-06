@@ -282,3 +282,46 @@ def run_queue_full(node, session, keyspace: str, tmp_path):
     assert sum(row["verdict"] == "skipped" for row in rows) >= sum(s["rows"] for s in skipped)
     archived = list((history / "archive").glob("*/*.jsonl"))
     assert archived, "a skipped file is kept in archive/"
+
+
+def lenient_checker(tmp_path) -> str:
+    """A broken checker: it answers the probe, then says ok to every row of every file."""
+    path = tmp_path / "lenient_checker"
+    path.write_text(
+        '#!/bin/sh\ninput=$(cat)\n[ -z "$input" ] && exit 2\n'
+        'printf "%s\\n" "$input" | '
+        'sed -n \'s/^# key \\([0-9]*\\) .*/{"key":\\1,"result":"ok","ops":1,"ms":0}/p\'\n'
+        'exit 0\n')
+    path.chmod(0o755)
+    return str(path)
+
+
+def run_canaries(node, session, keyspace: str, tmp_path):
+    """Every canary is rejected by the real checker, and no real row is touched by them."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "60s", "--checker-bin", checker_bin(),
+                         "--canary-every", "1", "--check-age", "10s", "--readback", "off")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+    canaries = scv_lines(result.stdout, "canary")
+    assert canaries, "no canary was checked"
+    assert all(c["result"] == "illegal" for c in canaries), canaries
+    report = json.loads((history / "report.json").read_text())
+    assert report["canaries_ok"] == len(canaries) and report["canaries_failed"] == 0, report
+    rows = rows_of(history)
+    assert rows and all(row["verdict"] == "ok" for row in rows), \
+        {row["verdict"] for row in rows}
+    assert not list((history / "sealed").iterdir()), "checked canaries are deleted"
+
+
+def run_broken_checker(node, session, keyspace: str, tmp_path):
+    """A checker that accepts everything accepts a canary too: verifier-broken, exit 1."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "20s", "--checker-bin", lenient_checker(tmp_path),
+                         "--canary-every", "1", "--check-age", "5s", "--readback", "off")
+    assert result.returncode == 1, f"expected exit 1, got {result.returncode}"
+    canaries = scv_lines(result.stdout, "canary")
+    assert canaries and all(c["result"] == "ok" for c in canaries), canaries
+    assert "verifier-broken" in result.stderr
+    assert list((history / "archive").glob("canary-*/canary-*.jsonl")), "the canary is kept"

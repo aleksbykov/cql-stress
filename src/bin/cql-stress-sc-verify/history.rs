@@ -181,6 +181,61 @@ impl CheckFile {
     }
 }
 
+/// A canary (spec §11.4): the first row of `check_file` that has a read, alone as key 0, with
+/// the first cell of its earliest read set to a wid no write produced (the row's highest + 1).
+/// No order can explain that read, and the search fails right there, so the check costs
+/// almost nothing. `None` when no row has a read.
+pub fn make_canary(check_file: &str) -> Option<String> {
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in check_file.lines() {
+        if line.starts_with("# key ") || blocks.is_empty() {
+            blocks.push(Vec::new());
+        }
+        blocks.last_mut().unwrap().push(line);
+    }
+    blocks.into_iter().find_map(|block| canary_of(&block))
+}
+
+fn canary_of(block: &[&str]) -> Option<String> {
+    let header = block.first()?.strip_prefix("# key ")?;
+    let (key, rest) = header.split_once(' ')?;
+    let events: Vec<serde_json::Value> = block[1..]
+        .iter()
+        .map(|line| serde_json::from_str(line).ok())
+        .collect::<Option<_>>()?;
+    let max_wid = events
+        .iter()
+        .filter(|ev| ev["kind"] == "call" && ev["op"] == "write")
+        .flat_map(|ev| ev["cells"].as_array().into_iter().flatten())
+        .filter_map(|cell| cell.as_i64())
+        .max()
+        .unwrap_or(0);
+    let returned: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|ev| ev["kind"] == "return" && ev["op"] == "read")
+        .map(|ev| &ev["id"])
+        .collect();
+    let earliest = events
+        .iter()
+        .filter(|ev| ev["kind"] == "call" && ev["op"] == "read" && returned.contains(&&ev["id"]))
+        .min_by_key(|ev| ev["time_ns"].as_u64())?;
+    let corrupted_id = &earliest["id"];
+
+    let key_field = format!("\"key\":{key},");
+    let mut out = format!("# key 0 {rest}\n");
+    for (line, ev) in block[1..].iter().zip(&events) {
+        let mut line = line.replacen(&key_field, "\"key\":0,", 1);
+        if ev["kind"] == "return" && &ev["id"] == corrupted_id {
+            let start = line.find("\"cells\":[")? + "\"cells\":[".len();
+            let end = start + line[start..].find([',', ']'])?;
+            line.replace_range(start..end, &(max_wid + 1).to_string());
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 /// One line of `rows.jsonl` (spec §14.3).
 #[derive(Serialize, Debug, Clone)]
 pub struct RowLine {
@@ -563,6 +618,46 @@ mod tests {
         );
         assert!(rows[1].contains("\"verdict\":\"violation\""), "{}", rows[1]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_canary_corrupts_the_first_read_test() {
+        let file = r#"# key 0 pk 1 gen "10" ck 0
+{"id":1,"client_id":0,"kind":"call","op":"write","key":0,"cells":[1,1],"time_ns":100}
+{"id":1,"client_id":0,"kind":"return","op":"write","key":0,"time_ns":200,"status":"ok"}
+# key 1 pk 2 gen "11" ck 0
+{"id":2,"client_id":0,"kind":"call","op":"write","key":1,"cells":[1,1],"time_ns":100}
+{"id":3,"client_id":1,"kind":"call","op":"read","key":1,"time_ns":600}
+{"id":3,"client_id":1,"kind":"return","op":"read","key":1,"cells":[1,1],"time_ns":700,"status":"ok"}
+{"id":4,"client_id":0,"kind":"call","op":"write","key":1,"cells":[null,2],"time_ns":300}
+{"id":4,"client_id":0,"kind":"return","op":"write","key":1,"time_ns":400,"status":"ok"}
+{"id":5,"client_id":2,"kind":"call","op":"read","key":1,"time_ns":500}
+{"id":5,"client_id":2,"kind":"return","op":"read","key":1,"cells":[1,2],"time_ns":550,"status":"ok"}
+{"id":2,"client_id":0,"kind":"return","op":"write","key":1,"time_ns":200,"status":"ok"}
+"#;
+        // Row 0 has no read, so row 1 is copied as key 0. Its earliest read is id 5 (started
+        // at 500); that read's first cell gets wid 3, which no write produced.
+        let canary = make_canary(file).unwrap();
+        let want = file
+            .lines()
+            .skip(3)
+            .map(|line| {
+                line.replace("# key 1 ", "# key 0 ")
+                    .replace("\"key\":1", "\"key\":0")
+                    .replace(
+                        "\"cells\":[1,2],\"time_ns\":550",
+                        "\"cells\":[3,2],\"time_ns\":550",
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(canary, want);
+
+        assert!(
+            make_canary(&file.lines().take(3).collect::<Vec<_>>().join("\n")).is_none(),
+            "no read"
+        );
     }
 
     /// With `--checker on`, the lines wait for the checker; a closed file carries them.

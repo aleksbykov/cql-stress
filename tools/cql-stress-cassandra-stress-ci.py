@@ -24,6 +24,8 @@ from test_cs_sc_verify import run_both as run_sc_verify_both
 from test_cs_sc_verify import run_checker as run_sc_verify_checker
 from test_cs_sc_verify import run_hanging_checker as run_sc_verify_hanging_checker
 from test_cs_sc_verify import run_queue_full as run_sc_verify_queue_full
+from test_cs_sc_verify import run_canaries as run_sc_verify_canaries
+from test_cs_sc_verify import run_broken_checker as run_sc_verify_broken_checker
 
 
 # Utils for test cases
@@ -307,4 +309,18 @@ def test_strong_consistency_sc_verify_queue_full(
         strong_consistency_node, strong_consistency_session, strong_consistency_keyspace,
         tmp_path):
     run_sc_verify_queue_full(node=strong_consistency_node, session=strong_consistency_session,
+                         keyspace=strong_consistency_keyspace, tmp_path=tmp_path)
+
+
+def test_strong_consistency_sc_verify_canaries(
+        strong_consistency_node, strong_consistency_session, strong_consistency_keyspace,
+        tmp_path):
+    run_sc_verify_canaries(node=strong_consistency_node, session=strong_consistency_session,
+                         keyspace=strong_consistency_keyspace, tmp_path=tmp_path)
+
+
+def test_strong_consistency_sc_verify_broken_checker(
+        strong_consistency_node, strong_consistency_session, strong_consistency_keyspace,
+        tmp_path):
+    run_sc_verify_broken_checker(node=strong_consistency_node, session=strong_consistency_session,
                          keyspace=strong_consistency_keyspace, tmp_path=tmp_path)

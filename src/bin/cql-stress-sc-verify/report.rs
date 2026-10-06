@@ -58,6 +58,10 @@ pub enum Scv<'a> {
         file: String,
         rows: usize,
     },
+    /// A canary's result; anything but `illegal` is `verifier-broken`.
+    Canary {
+        result: &'a str,
+    },
     End {
         exit: u8,
     },
@@ -230,6 +234,11 @@ pub struct Report {
     pub rows_illegal: u64,
     pub rows_unknown: u64,
     pub rows_skipped: u64,
+    /// Canaries the checker rejected, as it must; ones it did not (`verifier-broken`); ones
+    /// the queue or the end of the run left unchecked.
+    pub canaries_ok: u64,
+    pub canaries_failed: u64,
+    pub canaries_skipped: u64,
     pub read_p99_ms: f64,
     pub write_p99_ms: f64,
     pub sched_delay_p99_ms: f64,
@@ -323,6 +332,10 @@ mod tests {
         assert_eq!(
             line(&skipped),
             r#"SCV {"t":"skipped","file":"40","rows":50}"#
+        );
+        assert_eq!(
+            line(&Scv::Canary { result: "illegal" }),
+            r#"SCV {"t":"canary","result":"illegal"}"#
         );
         assert_eq!(line(&Scv::End { exit: 1 }), r#"SCV {"t":"end","exit":1}"#);
     }
