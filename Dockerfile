@@ -39,7 +39,9 @@ ENV PATH="${PATH}:/usr/local/bin"
 LABEL org.opencontainers.image.source="https://github.com/scylladb/cql-stress"
 LABEL org.opencontainers.image.title="ScyllaDB cql-stress"
 
-COPY --from=builder /app/target/dist/cql-stress-cassandra-stress /usr/local/bin/cql-stress-cassandra-stress
+# `cql-stress-sc-verify` exists only in a `strong-consistency` build. A pattern that matches
+# nothing is allowed next to a source that matches, so the ordinary image simply lacks it.
+COPY --from=builder /app/target/dist/cql-stress-cassandra-stress /app/target/dist/cql-stress-sc-verif[y] /usr/local/bin/
 COPY --from=builder /app/target/dist/cql-stress-scylla-bench /usr/local/bin/cql-stress-scylla-bench
 
 RUN --mount=type=cache,target=/var/cache/apt apt-get update \

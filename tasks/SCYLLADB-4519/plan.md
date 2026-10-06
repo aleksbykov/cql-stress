@@ -386,10 +386,10 @@ start-up session; `--mode both` (task 18) gives bulk its own.
 
 **Files:** Modify: `.github/workflows/rust.yml` (the strong-consistency build uploads `cql-stress-sc-verify` too, and the SC job puts it on PATH); `Dockerfile` only if the feature build skips the new binary
 
-- [ ] Build the image locally with `--build-arg CARGO_BUILD_FEATURES=strong-consistency`; `docker run --rm <image> -c "cql-stress-sc-verify --help"` works.
-- [ ] Make the CI change.
-- [ ] Run verify.
-- [ ] Commit `ci: build and test cql-stress-sc-verify in the strong consistency job [SCYLLADB-4519]`.
+- [x] Build the image locally with `--build-arg CARGO_BUILD_FEATURES=strong-consistency`; `docker run --rm <image> -c "cql-stress-sc-verify --help"` works.
+- [x] Make the CI change. (Dockerfile: one `COPY` with `cql-stress-sc-verif[y]`, a pattern allowed to match nothing next to a source that matches; `rust.yml`: the SC build and upload, and the SC test job's PATH.)
+- [x] Run verify. (Local SC image: 6.5 min build, all three binaries, `version` shows the branch SHA, a 5 s `--mode both` run inside it exits 0.)
+- [x] Commit `ci: build and test cql-stress-sc-verify in the strong consistency job [SCYLLADB-4519]`.
 - [ ] Ask the user, then `buildx` for amd64 and arm64 and push `aleksbykov/cql-stress:sc-verify-m1-<short-sha>`; `docker manifest inspect` shows both.
 
 **Checkpoint C** (human review): the PR is ready to open, linking the spec.
