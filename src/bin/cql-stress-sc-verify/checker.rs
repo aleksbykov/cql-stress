@@ -2,12 +2,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 /// How long the start-up probe waits for the checker.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -151,6 +154,99 @@ pub async fn check_file(
     Ok(FileVerdicts { per_key, killed })
 }
 
+/// One check file for a worker.
+#[derive(Debug)]
+pub struct Job {
+    pub seq: u64,
+    pub path: PathBuf,
+    pub rows: usize,
+    pub archive_dir: PathBuf,
+}
+
+/// The bounded queue of check files and the workers that check them (spec §11.3).
+///
+/// `submit` never waits: a full queue hands the job back, and the caller archives the file
+/// unchecked. Workers send each file's verdicts back; `next` yields them.
+pub struct CheckQueue {
+    jobs: Option<mpsc::Sender<Job>>,
+    results: mpsc::UnboundedReceiver<(u64, FileVerdicts)>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl CheckQueue {
+    pub fn start(cfg: CheckerConfig, workers: usize, capacity: usize) -> Self {
+        let (jobs, queue) = mpsc::channel::<Job>(capacity);
+        let queue = Arc::new(tokio::sync::Mutex::new(queue));
+        let (results_tx, results) = mpsc::unbounded_channel();
+        let cfg = Arc::new(cfg);
+        let workers = (0..workers)
+            .map(|_| {
+                let (queue, results_tx, cfg) = (queue.clone(), results_tx.clone(), cfg.clone());
+                tokio::spawn(async move {
+                    loop {
+                        let Some(job) = queue.lock().await.recv().await else {
+                            break;
+                        };
+                        let verdicts = check_file(&cfg, &job.path, job.rows, &job.archive_dir)
+                            .await
+                            .unwrap_or_else(|err| {
+                                tracing::error!("checking {} failed: {err:#}", job.path.display());
+                                FileVerdicts {
+                                    per_key: vec![RowResult::Unknown; job.rows],
+                                    killed: false,
+                                }
+                            });
+                        if results_tx.send((job.seq, verdicts)).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+        Self {
+            jobs: Some(jobs),
+            results,
+            workers,
+        }
+    }
+
+    /// Queues a file; a full (or closed) queue hands the job back at once.
+    pub fn submit(&self, job: Job) -> std::result::Result<(), Job> {
+        match &self.jobs {
+            Some(jobs) => jobs.try_send(job).map_err(|err| match err {
+                mpsc::error::TrySendError::Full(job) | mpsc::error::TrySendError::Closed(job) => {
+                    job
+                }
+            }),
+            None => Err(job),
+        }
+    }
+
+    /// Files waiting for a worker.
+    pub fn waiting(&self) -> usize {
+        self.jobs
+            .as_ref()
+            .map_or(0, |jobs| jobs.max_capacity() - jobs.capacity())
+    }
+
+    /// The next checked file; `None` once the queue is closed and every worker is done.
+    pub async fn next(&mut self) -> Option<(u64, FileVerdicts)> {
+        self.results.recv().await
+    }
+
+    /// No more files: the workers finish what is queued, then stop.
+    pub fn close(&mut self) {
+        self.jobs = None;
+    }
+
+    /// Stops the workers now; their children are killed.
+    pub fn abort(&self) {
+        for worker in &self.workers {
+            worker.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -284,6 +380,54 @@ pub(crate) mod tests {
                 archive.display()
             )
         );
+    }
+
+    fn job(file: &Path, seq: u64) -> Job {
+        Job {
+            seq,
+            path: file.to_owned(),
+            rows: 2,
+            archive_dir: file.parent().unwrap().join(format!("archive-{seq}")),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_queue_returns_every_file_test() {
+        let (file, _) = check_file_fixture("queue-ok", 2);
+        let all_ok = fake_checker(
+            "queue-ok",
+            &format!("cat >/dev/null\n{OK_0}\n{OK_1}\nexit 0"),
+        );
+        let mut queue = CheckQueue::start(config(all_ok, Duration::from_secs(5)), 2, 4);
+        for seq in 0..3 {
+            queue.submit(job(&file, seq)).unwrap();
+        }
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let (seq, verdicts) = queue.next().await.unwrap();
+            assert_eq!(verdicts.per_key, [RowResult::Ok, RowResult::Ok]);
+            seen.push(seq);
+        }
+        seen.sort();
+        assert_eq!(seen, [0, 1, 2]);
+        queue.close();
+        assert!(queue.next().await.is_none(), "closed and drained");
+    }
+
+    /// A full queue refuses at once: the load never waits for the checker.
+    #[tokio::test]
+    async fn a_full_queue_refuses_test() {
+        let (file, _) = check_file_fixture("queue-full", 2);
+        let hangs = fake_checker("queue-full", "cat >/dev/null\nsleep 30");
+        let queue = CheckQueue::start(config(hangs, Duration::from_secs(60)), 1, 1);
+        queue.submit(job(&file, 0)).unwrap();
+        // Let the worker take the first file and hang on it.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        queue.submit(job(&file, 1)).unwrap();
+        assert_eq!(queue.waiting(), 1);
+        let refused = queue.submit(job(&file, 2)).unwrap_err();
+        assert_eq!(refused.seq, 2, "the refused job comes back");
+        queue.abort();
     }
 
     #[tokio::test]

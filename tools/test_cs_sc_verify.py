@@ -8,7 +8,10 @@ them with the shared fixtures, which skip when the node cannot do strong consist
 """
 
 import json
+import os
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from test_cs_strong_consistency import UNAVAILABLE_CODE, keyspace_consistency
@@ -188,3 +191,94 @@ def run_both(node, session, keyspace: str, tmp_path):
     assert report["bulk_ops"] > 0 and report["rows"] > 0 and report["violations"] == 0, report
     rows = [json.loads(line) for line in (history / "rows.jsonl").read_text().splitlines()]
     assert rows and all(row["verdict"] == "unchecked" for row in rows), rows
+
+
+def checker_bin() -> str:
+    """porcupine_checker (porcupine_validator checker-v2) on PATH. A missing checker fails the
+    test rather than skipping it, so a CI job without it cannot pass by checking nothing."""
+    path = shutil.which("porcupine_checker")
+    assert path, "porcupine_checker (porcupine_validator checker-v2) is not on PATH"
+    return path
+
+
+def hanging_checker(tmp_path) -> str:
+    """A checker that answers the start-up probe, then hangs on every real file."""
+    path = tmp_path / "hanging_checker"
+    path.write_text('#!/bin/sh\nif [ -z "$(head -c1)" ]; then exit 2; fi\nsleep 600\n')
+    path.chmod(0o755)
+    return str(path)
+
+
+def scv_lines(stdout: str, kind: str) -> list:
+    prefix = 'SCV {"t":"' + kind + '"'
+    return [json.loads(line[len("SCV "):]) for line in stdout.splitlines()
+            if line.startswith(prefix)]
+
+
+def checked_run(node, profile: str, history, duration: str, *args: str):
+    cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
+           "--mode", "verify", "--duration", duration, "--history-dir", str(history), *args]
+    print(" ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    print(result.stdout[-3000:], result.stderr[-3000:], sep="\n")
+    return result
+
+
+def rows_of(history) -> list:
+    return [json.loads(line) for line in (history / "rows.jsonl").read_text().splitlines()]
+
+
+def run_checker(node, session, keyspace: str, tmp_path):
+    """--checker on: every quiet row is checked ok, and an ok file is deleted."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "30s", "--checker-bin", checker_bin(),
+                         "--check-age", "5s", "--readback", "off")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+    rows = rows_of(history)
+    assert rows and all(row["verdict"] == "ok" for row in rows), \
+        {row["verdict"] for row in rows}
+    checked = scv_lines(result.stdout, "checked")
+    assert sum(c["ok"] for c in checked) == len(rows), checked
+    assert not list((history / "sealed").iterdir()), "an all-ok check file is deleted"
+    assert not list((history / "archive").iterdir()), "nothing to keep"
+
+
+def run_hanging_checker(node, session, keyspace: str, tmp_path):
+    """A checker that hangs: rows are unknown, and the checked stream does not slow down."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+
+    def ops_per_s(result):
+        stats = scv_lines(result.stdout, "stats")[1:-1]  # whole intervals only
+        return sum(s["verified_ops_s"] for s in stats) / len(stats)
+
+    base = checked_run(node, profile, tmp_path / "off", "20s", "--checker", "off",
+                       "--report-interval", "2s")
+    assert base.returncode == 0
+    hung = checked_run(node, profile, tmp_path / "hung", "20s", "--checker-bin",
+                       hanging_checker(tmp_path), "--check-age", "3s", "--checker-timeout", "4s",
+                       "--checker-deadline", "5s", "--report-interval", "2s", "--readback", "off")
+    assert hung.returncode == 0, f"expected exit 0, got {hung.returncode}"
+    rows = rows_of(tmp_path / "hung")
+    assert rows and {row["verdict"] for row in rows} <= {"unknown", "skipped"}, \
+        {row["verdict"] for row in rows}
+    assert any(row["verdict"] == "unknown" for row in rows)
+    assert abs(ops_per_s(hung) - ops_per_s(base)) <= 0.05 * ops_per_s(base), \
+        (ops_per_s(hung), ops_per_s(base))
+
+
+def run_queue_full(node, session, keyspace: str, tmp_path):
+    """A full queue never waits: the file is archived unchecked and its rows are skipped."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "15s", "--checker-bin", hanging_checker(tmp_path),
+                         "--checker-workers", "1", "--queue-max", "1", "--check-rows", "2",
+                         "--ops-per-gen", "20", "--checker-timeout", "30s",
+                         "--checker-deadline", "2s", "--readback", "off")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+    skipped = scv_lines(result.stdout, "skipped")
+    assert skipped, "no SCV skipped line"
+    rows = rows_of(history)
+    assert sum(row["verdict"] == "skipped" for row in rows) >= sum(s["rows"] for s in skipped)
+    archived = list((history / "archive").glob("*/*.jsonl"))
+    assert archived, "a skipped file is kept in archive/"

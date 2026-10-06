@@ -183,6 +183,13 @@ jobs:
         run: pip install scylla-driver
       - name: Install pytest
         run: pip install -U pytest
+      # porcupine_checker for the cql-stress-sc-verify tests, from the image the Dockerfile pins.
+      - name: Install porcupine_checker
+        run: |
+          image=$(sed -n 's/^ARG CHECKER_IMAGE=//p' Dockerfile)
+          docker create --name checker "$image"
+          docker cp checker:/porcupine_checker /usr/local/bin/porcupine_checker
+          docker rm checker
       - name: Start ScyllaDB with strongly consistent tables
         run: |
           docker compose -f ./docker/scylla-test/compose.yml --profile strong-consistency up -d scylla-sc-test --wait

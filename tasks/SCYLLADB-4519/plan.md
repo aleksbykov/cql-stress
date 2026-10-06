@@ -467,15 +467,15 @@ lines once their verdict is final), `checker.rs`, `main.rs`, `report.rs`; Modify
 full queue → archive, `skipped`; at the end the queue drains until `--checker-deadline`, and
 what is left is `skipped`. `stats` gains `queue`; `report.json` gains checker totals.
 
-- [ ] Write the pytest first: `--checker on` with the checker built from porcupine_validator
+- [x] Write the pytest first: `--checker on` with the checker built from porcupine_validator
       `feat/checker-v2`: 30 s quiet → every row `ok`, `SCV checked` lines, no `sealed/`
       files left; with a hanging fake checker → rows `unknown` and checked ops/s within 5%
       of a `--checker off` run.
-- [ ] Run it and confirm the failure.
-- [ ] Write the code.
-- [ ] Remove the dead-code allow on `mod checker`.
-- [ ] Run verify and the pytests.
-- [ ] Commit `feat: check sealed rows with porcupine_checker [SCYLLADB-4519]`.
+- [x] Run it and confirm the failure. (Rows came out `unchecked`. Added from the review: `--queue-max 1` with a hanging checker → `skipped`. Unit tests: the queue returns every file; a full queue refuses at once; the recorder hands closed files over and writes their lines later.)
+- [x] Write the code.
+- [x] Remove the dead-code allow on `mod checker`.
+- [x] Run verify and the pytests. (Real checker: 96 rows `ok`, every file deleted; hanging checker: 64 rows `unknown`, ops/s within 5% of `--checker off`; queue full: 256 rows `skipped`, files archived. CI: the SC job copies `porcupine_checker` out of the image the Dockerfile pins as `ARG CHECKER_IMAGE`, which is public on Docker Hub.)
+- [x] Commit `feat: check sealed rows with porcupine_checker [SCYLLADB-4519]`.
 
 ## Task 23 — canaries (T22)
 

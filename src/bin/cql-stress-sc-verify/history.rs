@@ -182,8 +182,8 @@ impl CheckFile {
 }
 
 /// One line of `rows.jsonl` (spec §14.3).
-#[derive(Serialize)]
-struct RowLine<'a> {
+#[derive(Serialize, Debug, Clone)]
+pub struct RowLine {
     pk: i64,
     gen: String,
     ck: i32,
@@ -198,27 +198,64 @@ struct RowLine<'a> {
     writes_indet: u64,
     errors: u64,
     max_gap_ms: u64,
-    stop_reason: &'a str,
-    invariants: &'a str,
-    sweep: &'a str,
-    verdict: &'a str,
+    stop_reason: &'static str,
+    invariants: &'static str,
+    sweep: &'static str,
+    pub verdict: &'static str,
+}
+
+/// A row of a closed check file whose verdict waits for the checker.
+#[derive(Debug, Clone)]
+pub struct PendingRow {
+    pub line: RowLine,
+    /// An invariant fired: the verdict is `violation`, whatever the checker says.
+    pub violated: bool,
+}
+
+/// A closed check file handed to the checker, with its rows in key order.
+#[derive(Debug)]
+pub struct ClosedFile {
+    pub seq: u64,
+    pub path: PathBuf,
+    pub rows: Vec<PendingRow>,
+}
+
+/// What recording one sealed row did.
+#[derive(Debug, Default)]
+pub struct Recorded {
+    /// The archive directory, relative to `--history-dir`, when the row had a violation: its
+    /// check file is closed and copied there at once.
+    pub archive: Option<String>,
+    /// With `--checker on`, the check file the row closed.
+    pub closed: Option<ClosedFile>,
 }
 
 /// Writes sealed rows under `--history-dir`: their histories into check files
 /// (`sealed/<seq>.jsonl`, rotated by `--check-rows` and `--check-age`), a line per row into
 /// `rows.jsonl`, and a copy of every check file that holds a violation into `archive/<seq>/`.
+///
+/// With `--checker off`, a row's line is written when it seals. With `--checker on`, the
+/// lines wait in the closed file for the checker's verdicts, and the caller writes them.
 pub struct Recorder {
     dir: PathBuf,
     cells: usize,
     check_rows: usize,
     check_age: Duration,
+    defer: bool,
     rows: BufWriter<File>,
     open: Option<(CheckFile, u64, Instant)>,
+    pending: Vec<PendingRow>,
     next_seq: u64,
 }
 
 impl Recorder {
-    pub fn new(dir: &Path, cells: usize, check_rows: usize, check_age: Duration) -> Result<Self> {
+    pub fn new(
+        dir: &Path,
+        cells: usize,
+        check_rows: usize,
+        check_age: Duration,
+        defer: bool,
+    ) -> Result<Self> {
         let sealed = dir.join("sealed");
         std::fs::create_dir_all(&sealed)
             .with_context(|| format!("Failed to create {}", sealed.display()))?;
@@ -249,15 +286,16 @@ impl Recorder {
             cells,
             check_rows,
             check_age,
+            defer,
             rows: BufWriter::new(rows),
             open: None,
+            pending: Vec::new(),
             next_seq,
         })
     }
 
-    /// Records a sealed row. Returns the archive directory, relative to `--history-dir`, when
-    /// the row had a violation: its check file is closed and archived at once.
-    pub fn record(&mut self, row: &SealedRow) -> Result<Option<String>> {
+    /// Records a sealed row.
+    pub fn record(&mut self, row: &SealedRow) -> Result<Recorded> {
         if self.open.is_none() {
             let seq = self.next_seq;
             self.next_seq += 1;
@@ -288,49 +326,95 @@ impl Recorder {
             stop_reason: row.stop_reason.as_str(),
             invariants: if violated { "violation" } else { "ok" },
             sweep: if row.sweep_ok { "ok" } else { "incomplete" },
-            // Milestone 1 runs no checker: a row is a violation or unchecked (spec §4.3).
+            // Without the checker a row is a violation or unchecked (spec §4.3).
             verdict: if violated { "violation" } else { "unchecked" },
         };
-        let rows = &mut self.rows;
-        let result = (|| -> Result<()> {
-            serde_json::to_writer(&mut *rows, &line)?;
-            rows.write_all(b"\n")?;
-            rows.flush()?;
-            Ok(())
-        })();
-        result.context("Failed to write rows.jsonl")?;
+        if self.defer {
+            self.pending.push(PendingRow { line, violated });
+        } else {
+            self.write_line(&line)?;
+        }
 
         if violated {
             return self.close(true);
         }
         if full {
-            self.close(false)?;
+            return self.close(false);
         }
-        Ok(None)
+        Ok(Recorded::default())
     }
 
-    /// Closes the open check file and flushes `rows.jsonl`.
-    pub fn finish(mut self) -> Result<()> {
-        self.close(false)?;
+    /// Writes a row's final line to `rows.jsonl`.
+    pub fn write_line(&mut self, line: &RowLine) -> Result<()> {
+        let rows = &mut self.rows;
+        let result = (|| -> Result<()> {
+            serde_json::to_writer(&mut *rows, line)?;
+            rows.write_all(b"\n")?;
+            rows.flush()?;
+            Ok(())
+        })();
+        result.context("Failed to write rows.jsonl")
+    }
+
+    /// Closes the open check file and returns it, with `--checker on`.
+    pub fn finish(&mut self) -> Result<Option<ClosedFile>> {
+        let closed = self.close(false)?.closed;
         self.rows.flush().context("Failed to write rows.jsonl")?;
-        Ok(())
+        Ok(closed)
     }
 
-    fn close(&mut self, archive: bool) -> Result<Option<String>> {
-        let Some((file, seq, _)) = self.open.take() else {
-            return Ok(None);
-        };
-        let path = file.finish()?;
-        if !archive {
-            return Ok(None);
-        }
+    /// Moves a check file into `archive/<seq>/` and returns that directory, relative to
+    /// `--history-dir`. A file already copied there (a violation) only leaves `sealed/`.
+    pub fn archive(&self, seq: u64, path: &Path) -> Result<String> {
         let relative = format!("archive/{seq}");
         let dir = self.dir.join(&relative);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create {}", dir.display()))?;
-        std::fs::copy(&path, dir.join(format!("{seq}.jsonl")))
-            .with_context(|| format!("Failed to archive {}", path.display()))?;
-        Ok(Some(relative))
+        let target = dir.join(format!("{seq}.jsonl"));
+        if target.exists() {
+            std::fs::remove_file(path)
+        } else {
+            std::fs::rename(path, &target)
+        }
+        .with_context(|| format!("Failed to archive {}", path.display()))?;
+        Ok(relative)
+    }
+
+    /// Deletes a check file whose rows were all ok, with the directory the checker made.
+    pub fn discard(&self, seq: u64, path: &Path) -> Result<()> {
+        std::fs::remove_file(path)
+            .with_context(|| format!("Failed to delete {}", path.display()))?;
+        let dir = self.dir.join(format!("archive/{seq}"));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .with_context(|| format!("Failed to delete {}", dir.display()))?;
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, archive: bool) -> Result<Recorded> {
+        let Some((file, seq, _)) = self.open.take() else {
+            return Ok(Recorded::default());
+        };
+        let path = file.finish()?;
+        let mut recorded = Recorded::default();
+        if archive {
+            let relative = format!("archive/{seq}");
+            let dir = self.dir.join(&relative);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("Failed to create {}", dir.display()))?;
+            std::fs::copy(&path, dir.join(format!("{seq}.jsonl")))
+                .with_context(|| format!("Failed to archive {}", path.display()))?;
+            recorded.archive = Some(relative);
+        }
+        if self.defer {
+            recorded.closed = Some(ClosedFile {
+                seq,
+                path,
+                rows: std::mem::take(&mut self.pending),
+            });
+        }
+        Ok(recorded)
     }
 
     fn sealed_path(&self, seq: u64) -> PathBuf {
@@ -397,7 +481,7 @@ mod tests {
     fn recorder_rotates_check_files_and_writes_rows_test() {
         let dir = std::env::temp_dir().join(format!("sc-verify-recorder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut recorder = Recorder::new(&dir, 1, 2, Duration::from_secs(300)).unwrap();
+        let mut recorder = Recorder::new(&dir, 1, 2, Duration::from_secs(300), false).unwrap();
         recorder.record(&sealed(0, 0)).unwrap();
         // On disk before the file closes: rows.jsonl never names a row that a kill could lose.
         assert_eq!(
@@ -428,7 +512,7 @@ mod tests {
         );
 
         // A restarted process continues the numbering.
-        let mut again = Recorder::new(&dir, 1, 2, Duration::from_secs(300)).unwrap();
+        let mut again = Recorder::new(&dir, 1, 2, Duration::from_secs(300), false).unwrap();
         again.record(&sealed(9, 0)).unwrap();
         again.finish().unwrap();
         assert!(dir.join("sealed/2.jsonl").exists());
@@ -452,10 +536,14 @@ mod tests {
     fn a_violating_row_is_archived_when_it_seals_test() {
         let dir = std::env::temp_dir().join(format!("sc-verify-archive-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut recorder = Recorder::new(&dir, 1, 50, Duration::from_secs(300)).unwrap();
+        let mut recorder = Recorder::new(&dir, 1, 50, Duration::from_secs(300), false).unwrap();
         recorder.record(&sealed(0, 0)).unwrap();
-        let archive = recorder.record(&sealed(1, 2)).unwrap();
-        assert_eq!(archive.as_deref(), Some("archive/0"));
+        let recorded = recorder.record(&sealed(1, 2)).unwrap();
+        assert_eq!(recorded.archive.as_deref(), Some("archive/0"));
+        assert!(
+            recorded.closed.is_none(),
+            "--checker off hands nothing over"
+        );
         // Closed at once, so the evidence is on disk when the row seals.
         let archived = lines(&dir.join("archive/0/0.jsonl"));
         assert_eq!(archived, lines(&dir.join("sealed/0.jsonl")));
@@ -474,6 +562,46 @@ mod tests {
             rows[1]
         );
         assert!(rows[1].contains("\"verdict\":\"violation\""), "{}", rows[1]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// With `--checker on`, the lines wait for the checker; a closed file carries them.
+    #[test]
+    fn recorder_hands_closed_files_over_test() {
+        let dir = std::env::temp_dir().join(format!("sc-verify-defer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut recorder = Recorder::new(&dir, 1, 2, Duration::from_secs(300), true).unwrap();
+        assert!(recorder.record(&sealed(0, 0)).unwrap().closed.is_none());
+        let closed = recorder.record(&sealed(1, 0)).unwrap().closed.unwrap();
+        assert_eq!((closed.seq, closed.rows.len()), (0, 2));
+        assert_eq!(closed.path, dir.join("sealed/0.jsonl"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("rows.jsonl")).unwrap(),
+            "",
+            "lines wait"
+        );
+
+        let mut line = closed.rows[1].line.clone();
+        line.verdict = "ok";
+        recorder.write_line(&line).unwrap();
+        assert!(lines(&dir.join("rows.jsonl"))[0].contains("\"pk\":1"));
+
+        // A violation still closes and copies the file at once, and hands it over too.
+        let recorded = recorder.record(&sealed(2, 1)).unwrap();
+        assert_eq!(recorded.archive.as_deref(), Some("archive/1"));
+        let closed = recorded.closed.unwrap();
+        assert!(closed.rows[0].violated);
+        // Archiving it again only removes it from sealed/; the evidence stays.
+        assert_eq!(
+            recorder.archive(closed.seq, &closed.path).unwrap(),
+            "archive/1"
+        );
+        assert!(!closed.path.exists() && dir.join("archive/1/1.jsonl").exists());
+
+        recorder.record(&sealed(3, 0)).unwrap();
+        let last = recorder.finish().unwrap().unwrap();
+        recorder.discard(last.seq, &last.path).unwrap();
+        assert!(!last.path.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

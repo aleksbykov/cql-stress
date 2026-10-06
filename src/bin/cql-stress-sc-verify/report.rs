@@ -43,6 +43,21 @@ pub enum Scv<'a> {
         archive: &'a str,
     },
     Stats(IntervalStats),
+    /// A check file the checker finished: verdicts of its rows, and where its evidence is
+    /// kept unless every row was ok.
+    Checked {
+        file: String,
+        ok: usize,
+        illegal: usize,
+        unknown: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        archive: Option<&'a str>,
+    },
+    /// A check file archived unchecked: the queue was full, or the run ended first.
+    Skipped {
+        file: String,
+        rows: usize,
+    },
     End {
         exit: u8,
     },
@@ -83,6 +98,8 @@ pub struct IntervalStats {
     pub read_p99_ms: f64,
     pub write_p99_ms: f64,
     pub indet_pct: f64,
+    /// Check files waiting for a checker worker.
+    pub queue: usize,
     /// How late the slots' burst ticks ran: a busy loader stretches operation times.
     pub sched_delay_p99_ms: f64,
 }
@@ -183,6 +200,7 @@ impl Stats {
             } else {
                 indet as f64 * 100.0 / writes as f64
             },
+            queue: 0,
             sched_delay_p99_ms: p99_and_reset(&self.sched),
         }
     }
@@ -207,6 +225,11 @@ pub struct Report {
     pub writes_indet: u64,
     pub errors: u64,
     pub violations: u64,
+    /// Verdicts of the rows the checker decided, and of the rows it never got to.
+    pub rows_ok: u64,
+    pub rows_illegal: u64,
+    pub rows_unknown: u64,
+    pub rows_skipped: u64,
     pub read_p99_ms: f64,
     pub write_p99_ms: f64,
     pub sched_delay_p99_ms: f64,
@@ -275,11 +298,31 @@ mod tests {
             read_p99_ms: 1.5,
             write_p99_ms: 2.25,
             indet_pct: 0.0,
+            queue: 3,
             sched_delay_p99_ms: 0.125,
         });
         assert_eq!(
             line(&stats),
-            r#"SCV {"t":"stats","verified_ops_s":1234.5,"bulk_ops_s":0.0,"read_p99_ms":1.5,"write_p99_ms":2.25,"indet_pct":0.0,"sched_delay_p99_ms":0.125}"#
+            r#"SCV {"t":"stats","verified_ops_s":1234.5,"bulk_ops_s":0.0,"read_p99_ms":1.5,"write_p99_ms":2.25,"indet_pct":0.0,"queue":3,"sched_delay_p99_ms":0.125}"#
+        );
+        let checked = Scv::Checked {
+            file: "12".to_owned(),
+            ok: 49,
+            illegal: 1,
+            unknown: 0,
+            archive: Some("archive/12"),
+        };
+        assert_eq!(
+            line(&checked),
+            r#"SCV {"t":"checked","file":"12","ok":49,"illegal":1,"unknown":0,"archive":"archive/12"}"#
+        );
+        let skipped = Scv::Skipped {
+            file: "40".to_owned(),
+            rows: 50,
+        };
+        assert_eq!(
+            line(&skipped),
+            r#"SCV {"t":"skipped","file":"40","rows":50}"#
         );
         assert_eq!(line(&Scv::End { exit: 1 }), r#"SCV {"t":"end","exit":1}"#);
     }

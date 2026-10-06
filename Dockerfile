@@ -21,6 +21,10 @@ ENV CARGO_TERM_COLOR=always
 # strongly-consistent-tables API, which the ordinary image must not depend on.
 ARG CARGO_BUILD_FEATURES=""
 
+# porcupine_checker (porcupine_validator checker-v2), pinned here once: CI's strong
+# consistency tests take the checker from this image too.
+ARG CHECKER_IMAGE=aleksbykov/porcupine_validator:v2-0cdfd5c
+
 COPY . .
 
 RUN apt-get update && apt-get install -y \
