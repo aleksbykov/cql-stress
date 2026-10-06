@@ -177,12 +177,13 @@ def run_bulk(node, session, keyspace: str, tmp_path):
 
 
 def run_both(node, session, keyspace: str, tmp_path):
-    """Checked slots and bulk load together: every checked row stays clean."""
+    """Checked slots and bulk load together: every checked row is checked ok."""
     profile = write_profile(tmp_path / "profile.yaml", keyspace)
     history = tmp_path / "history"
     cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
            "--mode", "both", "--duration", "20s", "--bulk-threads", "8",
-           "--report-interval", "5s", "--history-dir", str(history), "--checker", "off"]
+           "--report-interval", "5s", "--history-dir", str(history),
+           "--checker-bin", checker_bin(), "--check-age", "5s"]
     print(" ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     print(result.stdout, result.stderr, sep="\n")
@@ -196,7 +197,8 @@ def run_both(node, session, keyspace: str, tmp_path):
     report = json.loads((history / "report.json").read_text())
     assert report["bulk_ops"] > 0 and report["rows"] > 0 and report["violations"] == 0, report
     rows = [json.loads(line) for line in (history / "rows.jsonl").read_text().splitlines()]
-    assert rows and all(row["verdict"] == "unchecked" for row in rows), rows
+    assert rows and all(row["verdict"] == "ok" for row in rows), \
+        {row["verdict"] for row in rows}
 
 
 def checker_bin() -> str:
@@ -307,7 +309,7 @@ def run_canaries(node, session, keyspace: str, tmp_path):
     profile = write_profile(tmp_path / "profile.yaml", keyspace)
     history = tmp_path / "history"
     result = checked_run(node, profile, history, "60s", "--checker-bin", checker_bin(),
-                         "--canary-every", "1", "--check-age", "10s", "--readback", "off")
+                         "--canary-every", "1", "--check-age", "10s")
     assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
     canaries = scv_lines(result.stdout, "canary")
     assert canaries, "no canary was checked"
@@ -318,6 +320,8 @@ def run_canaries(node, session, keyspace: str, tmp_path):
     assert rows and all(row["verdict"] == "ok" for row in rows), \
         {row["verdict"] for row in rows}
     assert not list((history / "sealed").iterdir()), "checked canaries are deleted"
+    readback = scv_lines(result.stdout, "readback")
+    assert readback and readback[0]["ok"] == readback[0]["rows"] == len(rows), readback
 
 
 def run_broken_checker(node, session, keyspace: str, tmp_path):
@@ -361,3 +365,15 @@ def run_deleted_row(node, session, keyspace: str, tmp_path):
     lines = [json.loads(line) for line in (history / "readback.jsonl").read_text().splitlines()]
     assert any(line["pk"] == row["pk"] and line["gen"] == row["gen"] and line["result"] == "lost"
                for line in lines), lines
+
+
+def run_tiny_checker_mem(node, session, keyspace: str, tmp_path):
+    """A checker without enough memory decides nothing: rows are unknown, never ok."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "15s", "--checker-bin", checker_bin(),
+                         "--checker-mem", "1M", "--check-age", "5s", "--readback", "off")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+    rows = rows_of(history)
+    assert rows and all(row["verdict"] == "unknown" for row in rows), \
+        {row["verdict"] for row in rows}

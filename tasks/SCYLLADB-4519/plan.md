@@ -546,9 +546,9 @@ porcupine_validator `v2-<sha>` image), for both architectures; the ordinary imag
 
 ## Task 27 — the milestone 2 integration list (T24)
 
-- [ ] On compose, the §20.5 list: 60 s with `--canary-every 1 --check-age 10s` → all rows
+- [x] On compose, the §20.5 list: 60 s with `--canary-every 1 --check-age 10s` → all rows
       `ok`, read-back all `ok`, canaries `illegal`; a hanging checker → `unknown` and
       unchanged throughput; a tiny `--checker-mem` → `unknown`; a deleted row → `lost`;
-      plus the M1 tests unchanged.
+      plus the M1 tests unchanged. (17 SC pytests: the canary run now also reads back ok; `--mode both` uses the real checker and wants every row `ok`; new: `--checker-mem 1M` → the Go runtime cannot start, rows `unknown`. Rust tests also pass on the plain node, as in CI. The first full run failed only because the host disk was 99% full and ScyllaDB rejected writes; after pruning the Docker build cache, all green.)
 
 **Checkpoint F** (human review): the §20.5 integration list is green; the CS M2 PR is ready.
