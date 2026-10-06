@@ -32,6 +32,13 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or(EnvFilter::new("warn")))
         .init();
+    // Release builds abort on panic, which would skip the exit code and the last SCV line: a
+    // crashed tool must still say so, with exit 3 (spec §14.5).
+    std::panic::set_hook(Box::new(|panic| {
+        eprintln!("error: cql-stress-sc-verify crashed: {panic}");
+        report::print(&Scv::End { exit: 3 });
+        std::process::exit(3);
+    }));
 
     let cli = Cli::parse_checked(std::env::args_os()).unwrap_or_else(|err| {
         // clap prints --help and --version itself and exits 0; anything else is a usage error.
@@ -137,8 +144,8 @@ async fn main() -> Result<()> {
         checked.exit.raise(3);
     }
     for slot in slots {
+        // A panic exits 3 through the hook; this is only a second line of defence.
         if slot.await.is_err() {
-            // A panicked slot: its rows cannot be vouched for.
             checked.exit.raise(3);
         }
     }

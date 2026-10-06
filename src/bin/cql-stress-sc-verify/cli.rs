@@ -172,6 +172,21 @@ impl Cli {
             cli.duration.is_some() || cli.ops.is_some(),
             "give --duration, or -n with --mode bulk"
         );
+        // Zero here would panic (an interval of 0) or spin (rows sealed with no operations).
+        for (name, zero) in [
+            ("--burst-interval", cli.burst_interval.is_zero()),
+            ("--report-interval", cli.report_interval.is_zero()),
+            ("--check-age", cli.check_age.is_zero()),
+            ("--slots", cli.slots == 0),
+            ("--clients-per-row", cli.clients_per_row == 0),
+            ("--ops-per-gen", cli.ops_per_gen == 0),
+            ("--burst-ops", cli.burst_ops == 0),
+            ("--max-indeterminate", cli.max_indeterminate == 0),
+            ("--sweep-retries", cli.sweep_retries == 0),
+            ("--check-rows", cli.check_rows == 0),
+        ] {
+            anyhow::ensure!(!zero, "{name} must be greater than 0");
+        }
         // A cell expiring mid-round would look exactly like a lost write (spec §7.4).
         let longest_round = cli.max_gen_duration
             + cli.request_timeout
@@ -313,6 +328,10 @@ mod tests {
             "--duration 1m --ssl --ssl-cert c.pem",
             "--duration 1m --ssl --ssl-key k.pem",
             "--duration 1m --ttl 300",
+            "--duration 1m --burst-interval 0s",
+            "--duration 1m --report-interval 0ms",
+            "--duration 1m --slots 0",
+            "--duration 1m --ops-per-gen 0",
         ] {
             assert!(parse(bad).is_err(), "{bad:?} must be rejected");
         }
