@@ -168,7 +168,7 @@ History, check file `sealed/<seq>.jsonl` (§14.1, format v2, owned by porcupine_
 
 ```text
 SCV {"t":"start","mode":"both","pop":"seq=0..2047","slots":32,"gen_base":"..."}
-SCV {"t":"violation","kind":"INV-3","pk":7,"gen":"...","cell":"c1","archive":"archive/12"}
+SCV {"t":"violation","kind":"INV-3","pk":7,"gen":"...","cell":"c1","wall_ms":1791293683732,"archive":"archive/12"}
 SCV {"t":"stats","verified_ops_s":0,"bulk_ops_s":0,"read_p99_ms":0,"write_p99_ms":0,"indet_pct":0,"sched_delay_p99_ms":0}
 SCV {"t":"end","exit":0}
 ```
@@ -229,5 +229,7 @@ files and the `archive/` layout these need, and the CLI leaves room for
 - A read cell that does not decode is written to the history as wid `-1`, which is never issued, so the checker cannot explain that read either; `null` would hide it. (build)
 - When several exit codes apply, the highest wins: 3 over 2 over 1. A run whose tool failed cannot vouch for its verdicts, which is worse than a finding. (build)
 - `--ttl` above 0 must cover 10 rounds of the longest possible length: `max_gen_duration + request_timeout + sweep_retries × (sweep_backoff + request_timeout)` (§7.4). (build)
+- The `SCV violation` line is printed when the row seals, once its check file is in `archive/<seq>/`, so SCT can copy the evidence before it raises the event; `wall_ms` says when the read exposed the violation, so SCT still places it next to the nemesis that caused it. A human-readable line is printed at detection. (build)
+- `stats` lines cover one `--report-interval`; latencies are p99 of successful operations; `sched_delay_p99_ms` is how late the slots' burst ticks ran. (build)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)

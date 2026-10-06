@@ -21,6 +21,7 @@ use crate::history::OpRecord;
 use crate::invariants::{RowState, Seen, Violation, WriteEnd};
 use crate::keys::{GenMinter, RowKey};
 use crate::ops::{Failure, OpError, Statements};
+use crate::report::Stats;
 
 /// Exit codes, raised from anywhere; the highest wins: 3 (the tool or profile is broken)
 /// over 2 (set-up failure) over 1 (a violation). A run whose tool failed cannot vouch for
@@ -123,6 +124,13 @@ fn write_mask(cells: usize, insert_ratio: f64) -> u8 {
     }
 }
 
+/// A violation and when the read that exposed it ended, in unix ms.
+#[derive(Debug, Clone, Copy)]
+pub struct Detected {
+    pub violation: Violation,
+    pub wall_ms: u64,
+}
+
 /// A sealed row, ready to be recorded.
 #[derive(Debug, Clone)]
 pub struct SealedRow {
@@ -137,7 +145,7 @@ pub struct SealedRow {
     pub errors: u64,
     pub max_gap_ms: u64,
     pub stop_reason: StopReason,
-    pub violations: Vec<Violation>,
+    pub violations: Vec<Detected>,
     pub sweep_ok: bool,
 }
 
@@ -148,6 +156,7 @@ pub struct Checked {
     pub cli: Cli,
     pub cells: usize,
     pub exit: ExitCode,
+    pub stats: Stats,
     pks: Box<dyn Distribution>,
     gens: Mutex<GenMinter>,
     clock: Instant,
@@ -170,6 +179,7 @@ impl Checked {
             cli,
             cells,
             exit: ExitCode::default(),
+            stats: Stats::default(),
             pks,
             gens: Mutex::new(gens),
             clock: Instant::now(),
@@ -238,7 +248,7 @@ struct Round {
     writes_ok: u64,
     writes_indet: u64,
     errors: u64,
-    violations: Vec<Violation>,
+    violations: Vec<Detected>,
     last_ok_ns: u64,
     max_gap_ns: u64,
     stop: Option<StopReason>,
@@ -262,15 +272,20 @@ pub async fn run_slot(
     let offset = cli.burst_interval * slot as u32 / cli.slots as u32;
     let (ticks_tx, ticks) = watch::channel(0u64);
     let interval = cli.burst_interval;
-    let ticker = tokio::spawn(async move {
-        let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + offset, interval);
-        // A stalled loader skips the bursts it missed rather than firing them back to back.
-        timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            timer.tick().await;
-            ticks_tx.send_modify(|tick| *tick += 1);
-        }
-    });
+    let ticker = {
+        let checked = checked.clone();
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now() + offset;
+            let mut timer = tokio::time::interval_at(start, interval);
+            // A stalled loader skips the bursts it missed rather than firing them back to back.
+            timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                let due = timer.tick().await;
+                checked.stats.sched_delay(due.elapsed());
+                ticks_tx.send_modify(|tick| *tick += 1);
+            }
+        })
+    };
 
     let mut first = true;
     while !checked.is_stopped() {
@@ -434,6 +449,7 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
             round.state.end_write(wid, WriteEnd::Ok(end_ns));
             round.writes_ok += 1;
             round.succeeded(end_ns);
+            checked.stats.write(Duration::from_nanos(end_ns - start_ns));
         }
         Err(error) => {
             round.errors += 1;
@@ -441,6 +457,7 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
                 Failure::Indeterminate => {
                     round.state.end_write(wid, WriteEnd::Indeterminate);
                     round.writes_indet += 1;
+                    checked.stats.write_indeterminate();
                 }
                 Failure::Fail => round.state.end_write(wid, WriteEnd::Fail(end_ns)),
                 Failure::WorkloadError | Failure::ReadFailed => {
@@ -479,13 +496,16 @@ async fn read(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: usi
             round.state.end_read(&seen);
             round.reads += 1;
             round.succeeded(end_ns);
-            for violation in &violations {
+            checked.stats.read(Duration::from_nanos(end_ns - start_ns));
+            let wall_ms = unix_ms();
+            for violation in violations {
+                // The SCV line follows when the row seals and its evidence is archived.
                 println!(
                     "VIOLATION {} pk {} gen {} cell c{}",
                     violation.kind, key.pk, key.gen, violation.cell
                 );
+                round.violations.push(Detected { violation, wall_ms });
             }
-            round.violations.extend(violations);
             round.ops.push(OpRecord::Read {
                 client,
                 start_ns,
@@ -520,7 +540,7 @@ async fn sweep(checked: &Checked, round: &Mutex<Round>, key: &RowKey) -> bool {
     false
 }
 
-fn unix_ms() -> u64 {
+pub fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)

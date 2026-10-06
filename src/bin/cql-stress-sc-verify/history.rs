@@ -326,7 +326,7 @@ impl Recorder {
 mod tests {
     use super::*;
     use crate::invariants::{Inv, Seen, Violation, WriteStatus};
-    use crate::slot::StopReason;
+    use crate::slot::{Detected, StopReason};
 
     const GOLDEN: &str = include_str!("history_test.jsonl");
 
@@ -354,9 +354,12 @@ mod tests {
             max_gap_ms: 7,
             stop_reason: StopReason::Ops,
             violations: vec![
-                Violation {
-                    kind: Inv::Inv1,
-                    cell: 0
+                Detected {
+                    violation: Violation {
+                        kind: Inv::Inv1,
+                        cell: 0
+                    },
+                    wall_ms: 150,
                 };
                 violations
             ],

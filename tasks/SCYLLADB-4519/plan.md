@@ -320,17 +320,20 @@ sealed row; a failure to record is exit 3. The pytest helper passes `--history-d
 
 **Files:** Create: `src/bin/cql-stress-sc-verify/report.rs`; Modify: `main.rs`, `slot.rs`
 
-**Internals:** `fn scv(line: &impl Serialize)` prints `SCV {json}`; `start`,
-`violation`, `stats` (per `--report-interval`), `end`; `report.json` rewritten
-atomically (write a temp file, then rename); hdrhistogram p99 per op kind;
-`sched_delay_p99_ms` from a ticker measuring lateness; exit 1 when any
-violation was seen.
+**Internals:** `enum Scv` (serde, tagged `t`): `Start`, `Violation` (printed at seal with its
+archive and the detection time `wall_ms`), `Stats(IntervalStats)`, `End`; `gen` and
+`gen_base` as strings, `cell` as `c<n>`. `struct Stats` shared by the slots: hdrhistograms
+in microseconds (read, write, scheduling delay; per interval and total; successful operations
+only), interval counters for ops, writes, indeterminate writes. The slot ticker records how
+late each tick ran. `struct Report` (totals) is written to `report.json` atomically (a temp
+file, then rename) every `--report-interval` and at exit with `exit`. `main`'s consumer is a
+`select!` over sealed rows and the report interval.
 
-- [ ] Write tests: each line's JSON shape; `gen_base` is a string.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify; the compose run prints `start`, `stats` and `end`.
-- [ ] Commit `feat: report sc-verify progress as SCV lines [SCYLLADB-4519]`.
+- [x] Write tests: each line's JSON shape; `gen_base` is a string.
+- [x] Run them and confirm the failure. (They failed to compile.)
+- [x] Write the code.
+- [x] Run verify; the compose run prints `start`, `stats` and `end`. (12 s: 512 checked ops/s = 32 slots × 16, p99 about 5 ms, scheduling delay p99 1.9 ms, `report.json` with `exit: 0`.)
+- [x] Commit `feat: report sc-verify progress as SCV lines [SCYLLADB-4519]`.
 
 ## Task 16 — stale-read fault flag (T8)
 
