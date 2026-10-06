@@ -6,6 +6,7 @@ pub(crate) mod test_util;
 
 pub mod configuration;
 pub mod distribution;
+pub mod java_generate;
 pub mod run;
 pub mod sharded_stats;
 #[cfg(feature = "strong-consistency")]

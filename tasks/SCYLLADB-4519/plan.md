@@ -64,17 +64,22 @@ Update the spec's Module API in this commit.
 ## Task 3 — move the java distributions into the library (T2)
 
 **Files:**
-- Move: `src/bin/cql-stress-cassandra-stress/java_generate/distribution/` → `src/java_generate/distribution/`
-- Create: `src/java_generate/mod.rs` (the `Random` wrapper, moved from the binary's `java_generate/mod.rs`)
-- Modify: `src/lib.rs`, `src/bin/cql-stress-cassandra-stress/java_generate/mod.rs`
+- Move: `src/bin/cql-stress-cassandra-stress/java_generate/{mod.rs,faster_random.rs,distribution/}` → `src/java_generate/`
+- Keep: `src/bin/cql-stress-cassandra-stress/java_generate/distribution/enumerated.rs`
+- Create: `src/bin/cql-stress-cassandra-stress/java_generate/mod.rs` (re-exports)
+- Modify: `src/lib.rs`
 
-**Internals:** the binary keeps `faster_random` and `values` and adds
-`pub use cql_stress::java_generate::distribution;`, so its `crate::java_generate::distribution`
-paths keep working. The tests in `sequence.rs` and `uniform.rs` move with them.
+**Internals:** the `Random` wrapper, `faster_random` and the distributions move
+together, because both of the latter use `Random`'s private methods.
+`EnumeratedDistribution` stays in the binary, because `-mixed ratio(...)` adds inherent
+parsers to it through the `OperationRatio` alias, which only compiles in the crate
+that defines the type. The binary's `java_generate::distribution` is an inline module
+that re-exports the library's and declares `enumerated`, so every `crate::java_generate`
+path in the binary stays unchanged. The tests in the moved files move with them.
 
-- [ ] Move the files; fix the `crate::`/`super::` paths only.
-- [ ] Run verify; the cassandra-stress test count is unchanged and the library gains the moved tests.
-- [ ] Commit `refactor: move the java distributions into the library [SCYLLADB-4519]`.
+- [x] Move the files; fix the `crate::`/`super::` paths only.
+- [x] Run verify; the total test count is unchanged and the library gains the moved tests.
+- [x] Commit `refactor: move the java distributions into the library [SCYLLADB-4519]`.
 
 ## Task 4 — distribution and population parsers in the library (T2)
 
