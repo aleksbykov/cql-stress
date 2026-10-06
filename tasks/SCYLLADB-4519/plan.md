@@ -355,16 +355,22 @@ recorded, so the history holds what the "read returned".
 
 **Files:** Create: `src/bin/cql-stress-sc-verify/bulk.rs`; Modify: `main.rs`; Modify: `tools/test_cs_sc_verify.py`, `tools/cql-stress-cassandra-stress-ci.py`
 
-**Internals:** `fn bulk_gen(pk) -> i64` (fixed hash into `[0, 2^40)`); a bulk
-`OperationFactory`/`Operation` on `run.rs` with its own session: `write`,
-`read` (misses counted), `mixed` by `--bulk-read-ratio`; `-n` stops after n
-ops; `--bulk-retries` goes to `max_retries_per_op`; `--bulk-read-consistency`.
+**Internals:** `bulk_gen(pk)` (splitmix64 into `[0, 2^40)`); `pk_for(dist, op_id)` seeds a
+per-worker distribution with the operation id, so a retry hits the same pk and a `seq`
+preload covers its range exactly once; `BulkFactory`/`BulkOperation` on `run.rs` (`make_runnable!`):
+`write` (INSERT of random values at the profile's sizes, CL from `--consistency`), `read`
+(by full key, a miss counted; `--bulk-read-consistency`), `mixed`; `-n` → `Break` at that
+operation id; `--bulk-retries` → `max_retries_per_op`; `ignore_errors` (bulk is load).
+`BulkStats` (ops, misses, failed attempts). `main` splits into `run_verify` and `run_bulk`;
+`SCV start` gets optional `pop`/`gen_base`/`bulk_pop`; `report.json` gets `bulk_ops`,
+`bulk_misses`, `bulk_errors`; the `stats` lines carry `bulk_ops_s`. `--mode bulk` uses the
+start-up session; `--mode both` (task 18) gives bulk its own.
 
-- [ ] Write tests: `bulk_gen < 2^40` over many pks; pytest `run_bulk`: write `-n` then read the same range → 0 misses.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify and the pytest.
-- [ ] Commit `feat: add sc-verify bulk mode [SCYLLADB-4519]`.
+- [x] Write tests: `bulk_gen < 2^40` over many pks; pytest `run_bulk`: write `-n` then read the same range → 0 misses.
+- [x] Run them and confirm the failure. (The unit tests failed to compile; the pytest failed until `--mode bulk` existed.)
+- [x] Write the code.
+- [x] Run verify and the pytest. (2000 written, 2000 read with 0 misses, a never-written range 100/100 misses; a 5 s mixed run about 1700 ops/s on 16 threads.)
+- [x] Commit `feat: add sc-verify bulk mode [SCYLLADB-4519]`.
 
 ## Task 18 — `--mode both` (T9)
 

@@ -1,6 +1,10 @@
 //! `cql-stress-sc-verify`: a verified load for strongly consistent tables.
 //! Design: tasks/SCYLLADB-4519/spec.md.
 
+#[macro_use]
+extern crate async_trait;
+
+mod bulk;
 mod cli;
 mod history;
 mod invariants;
@@ -14,16 +18,21 @@ mod startup;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use std::sync::atomic::Ordering;
+
 use anyhow::Result;
+use cql_stress::configuration::Configuration;
 use cql_stress::java_generate::distribution::parse_population;
+use scylla::client::session::Session;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
+use bulk::{BulkFactory, BulkStats};
 use cli::{Cli, Mode};
 use history::Recorder;
 use keys::GenMinter;
 use profile::Profile;
-use report::{Report, Scv};
+use report::{IntervalStats, Report, Scv};
 use slot::{Checked, SealedRow};
 
 #[tokio::main]
@@ -58,15 +67,21 @@ async fn main() -> Result<()> {
     startup::startup(&session, &profile, &cli)
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
+    match cli.mode {
+        Mode::Verify => run_verify(cli, profile, session).await,
+        Mode::Bulk => run_bulk(cli, profile, session).await,
+        Mode::Both => exit_setup_failure(anyhow::anyhow!(
+            "--mode both is not implemented yet; use --mode verify or --mode bulk"
+        )),
+    }
+}
+
+/// The checked stream alone (`--mode verify`).
+async fn run_verify(cli: Cli, profile: Profile, session: Session) -> Result<()> {
     // Every checked statement, prepared once; this also proves the cluster accepts them.
     let statements = ops::Statements::prepare(&session, &profile, cli.ttl)
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
-    if cli.mode != Mode::Verify {
-        exit_setup_failure(anyhow::anyhow!(
-            "--mode bulk and --mode both are not implemented yet; use --mode verify"
-        ));
-    }
 
     let pks = parse_population(&cli.pop)
         .unwrap_or_else(|err| exit_setup_failure(err))
@@ -119,9 +134,10 @@ async fn main() -> Result<()> {
     );
     report::print(&Scv::Start {
         mode: "verify",
-        pop: &cli.pop,
+        pop: Some(&cli.pop),
         slots: cli.slots,
-        gen_base,
+        gen_base: Some(gen_base),
+        bulk_pop: None,
     });
 
     let (sealed_tx, mut sealed) = mpsc::unbounded_channel();
@@ -184,6 +200,79 @@ async fn main() -> Result<()> {
     println!(
         "Sealed {} rows, {} recorded operations, {} violations",
         totals.rows, totals.ops, totals.violations
+    );
+    report::print(&Scv::End { exit });
+    std::process::exit(exit.into())
+}
+
+/// Bulk load alone (`--mode bulk`): the preload, its check, or a dedicated load loader.
+async fn run_bulk(cli: Cli, profile: Profile, session: Session) -> Result<()> {
+    let stats = Arc::new(BulkStats::default());
+    let factory = BulkFactory::new(Arc::new(session), &profile, &cli, stats.clone())
+        .await
+        .unwrap_or_else(|err| exit_setup_failure(err));
+    println!(
+        "Start-up checks passed: {}.{} is strongly consistent and matches the profile",
+        profile.keyspace,
+        profile.bulk_table_name()
+    );
+    report::print(&Scv::Start {
+        mode: "bulk",
+        pop: None,
+        slots: 0,
+        gen_base: None,
+        bulk_pop: Some(&cli.bulk_pop),
+    });
+
+    let (_controller, run) = cql_stress::run::run(Configuration {
+        max_duration: cli.duration,
+        concurrency: cli.bulk_threads,
+        rate_limit_per_second: (cli.bulk_rate > 0).then_some(cli.bulk_rate as f64),
+        operation_factory: Arc::new(factory),
+        max_retries_per_op: cli.bulk_retries,
+        // Bulk is load: an operation that keeps failing is counted and skipped.
+        ignore_errors: true,
+    });
+    tokio::pin!(run);
+    let mut reports = tokio::time::interval(cli.report_interval);
+    reports.tick().await; // the first tick is immediate
+    let mut last_report = Instant::now();
+    let result = loop {
+        tokio::select! {
+            result = &mut run => break result,
+            _ = reports.tick() => {
+                let ops = stats.take_interval();
+                report::print(&Scv::Stats(IntervalStats {
+                    bulk_ops_s: ops as f64 / last_report.elapsed().as_secs_f64(),
+                    ..IntervalStats::default()
+                }));
+                last_report = Instant::now();
+            }
+        }
+    };
+    let exit = match result {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("error: the bulk run failed: {err:#}");
+            3
+        }
+    };
+    let report = Report {
+        bulk_ops: stats.ops.load(Ordering::Relaxed),
+        bulk_misses: stats.misses.load(Ordering::Relaxed),
+        bulk_errors: stats.errors.load(Ordering::Relaxed),
+        exit: Some(exit),
+        ..Report::default()
+    };
+    if let Err(err) = std::fs::create_dir_all(&cli.history_dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| report.write(&cli.history_dir))
+    {
+        tracing::warn!("failed to write report.json: {err:#}");
+    }
+    println!(
+        "Bulk: {} operations, {} reads found no row, {} failed attempts",
+        report.bulk_ops, report.bulk_misses, report.bulk_errors
     );
     report::print(&Scv::End { exit });
     std::process::exit(exit.into())

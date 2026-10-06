@@ -136,3 +136,31 @@ def run_stale_reads(node, session, keyspace: str, tmp_path):
     rows = [json.loads(line) for line in (history / "rows.jsonl").read_text().splitlines()]
     violated = [row for row in rows if row["verdict"] == "violation"]
     assert violated and all(row["invariants"] == "violation" for row in violated)
+
+
+def bulk(node, profile: str, history, *args: str) -> dict:
+    """Runs bulk mode and returns its report.json."""
+    cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
+           "--mode", "bulk", "--history-dir", str(history), *args]
+    print(" ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    print(result.stdout, result.stderr, sep="\n")
+    assert result.returncode == 0, f"bulk exited {result.returncode}"
+    return json.loads((history / "report.json").read_text())
+
+
+def run_bulk(node, session, keyspace: str, tmp_path):
+    """A preload written with -n reads back with no misses; a range never written misses."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    preload = "seq=1099511627776..1099511629775"   # 2000 pks from 2^40
+    written = bulk(node, profile, tmp_path / "write", "--bulk-op", "write", "-n", "2000",
+                   "--bulk-pop", preload)
+    assert (written["bulk_ops"], written["bulk_errors"]) == (2000, 0), written
+
+    read = bulk(node, profile, tmp_path / "read", "--bulk-op", "read", "-n", "2000",
+                "--bulk-pop", preload)
+    assert (read["bulk_ops"], read["bulk_misses"]) == (2000, 0), read
+
+    never = bulk(node, profile, tmp_path / "never", "--bulk-op", "read", "-n", "100",
+                 "--bulk-pop", "seq=1099600000000..1099600000099")
+    assert never["bulk_misses"] == 100, never

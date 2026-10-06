@@ -15,12 +15,20 @@ use serde::{Serialize, Serializer};
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Scv<'a> {
+    /// `pop` and `gen_base` describe the checked stream, `bulk_pop` the bulk load; each is
+    /// left out when that part does not run.
     Start {
         mode: &'a str,
-        pop: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pop: Option<&'a str>,
         slots: usize,
-        #[serde(serialize_with = "as_string")]
-        gen_base: i64,
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "opt_as_string"
+        )]
+        gen_base: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bulk_pop: Option<&'a str>,
     },
     /// Printed when the row seals and its check file is archived, so SCT can copy the
     /// evidence before it raises the event; `wall_ms` is when the read exposed it.
@@ -45,6 +53,13 @@ fn as_string<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Erro
     serializer.collect_str(value)
 }
 
+fn opt_as_string<S: Serializer>(value: &Option<i64>, serializer: S) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => serializer.collect_str(value),
+        None => serializer.serialize_none(),
+    }
+}
+
 fn cell_name<S: Serializer>(cell: &usize, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.collect_str(&format_args!("c{cell}"))
 }
@@ -60,8 +75,8 @@ pub fn print(scv: &Scv) {
     println!("{}", line(scv));
 }
 
-/// One `--report-interval` of the checked stream.
-#[derive(Serialize, Debug, Clone, Copy, PartialEq)]
+/// One `--report-interval` of the checked stream and the bulk load.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Default)]
 pub struct IntervalStats {
     pub verified_ops_s: f64,
     pub bulk_ops_s: f64,
@@ -195,6 +210,10 @@ pub struct Report {
     pub read_p99_ms: f64,
     pub write_p99_ms: f64,
     pub sched_delay_p99_ms: f64,
+    pub bulk_ops: u64,
+    /// Bulk reads that found no row: a preload check wants 0.
+    pub bulk_misses: u64,
+    pub bulk_errors: u64,
     /// Set in the last report, at exit.
     pub exit: Option<u8>,
 }
@@ -218,13 +237,25 @@ mod tests {
     fn scv_lines_test() {
         let start = Scv::Start {
             mode: "verify",
-            pop: "seq=0..2047",
+            pop: Some("seq=0..2047"),
             slots: 32,
-            gen_base: 1878307305715400704,
+            gen_base: Some(1878307305715400704),
+            bulk_pop: None,
         };
         assert_eq!(
             line(&start),
             r#"SCV {"t":"start","mode":"verify","pop":"seq=0..2047","slots":32,"gen_base":"1878307305715400704"}"#
+        );
+        let bulk = Scv::Start {
+            mode: "bulk",
+            pop: None,
+            slots: 0,
+            gen_base: None,
+            bulk_pop: Some("seq=1..10"),
+        };
+        assert_eq!(
+            line(&bulk),
+            r#"SCV {"t":"start","mode":"bulk","slots":0,"bulk_pop":"seq=1..10"}"#
         );
         let violation = Scv::Violation {
             kind: "INV-3",
