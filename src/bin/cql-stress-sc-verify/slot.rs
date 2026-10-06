@@ -1,0 +1,595 @@
+//! The checked stream: slots that work one fresh row at a time in bursts (spec §8).
+//!
+//! A slot mints a fresh row, lets its clients fire bursts of overlapping operations at it,
+//! stops starting new ones once a limit is reached, drains, sweeps and seals the row, then
+//! mints the next one. Each operation keeps the timing rule of the invariants module: a
+//! write takes its start time before it is issued and its end time before it locks the row;
+//! a read copies the floors, releases the lock, and only then takes its start time.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use cql_stress::java_generate::distribution::Distribution;
+use rand::{random_bool, random_range};
+use scylla::client::session::Session;
+use tokio::sync::{mpsc, watch};
+use tokio::time::MissedTickBehavior;
+
+use crate::cli::Cli;
+use crate::history::OpRecord;
+use crate::invariants::{RowState, Seen, Violation, WriteEnd};
+use crate::keys::{GenMinter, RowKey};
+use crate::ops::{Failure, OpError, Statements};
+
+/// Exit codes, raised from anywhere; the highest wins: 3 (the tool or profile is broken)
+/// over 2 (set-up failure) over 1 (a violation). A run whose tool failed cannot vouch for
+/// its verdicts, which is worse than a finding.
+#[derive(Debug, Default)]
+pub struct ExitCode(AtomicU8);
+
+impl ExitCode {
+    pub fn raise(&self, code: u8) {
+        self.0.fetch_max(code, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> u8 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Starts left in the current burst. A new tick resets it to `burst_ops`; unused starts do
+/// not carry over.
+#[derive(Debug)]
+struct Budget {
+    tick: u64,
+    left: u64,
+}
+
+impl Budget {
+    /// A budget that waits for the tick after `tick`.
+    fn new(tick: u64) -> Self {
+        Self { tick, left: 0 }
+    }
+
+    fn take(&mut self, tick: u64, burst_ops: u64) -> bool {
+        if tick != self.tick {
+            self.tick = tick;
+            self.left = burst_ops;
+        }
+        if self.left == 0 {
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    Ops,
+    Time,
+    Indeterminate,
+    End,
+}
+
+impl StopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::Ops => "ops",
+            StopReason::Time => "time",
+            StopReason::Indeterminate => "indeterminate",
+            StopReason::End => "end",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    ops: u64,
+    time: Duration,
+    indeterminate: u64,
+}
+
+/// Why a row stops starting operations, if it does; checked after every operation ends.
+fn should_stop(
+    limits: &Limits,
+    started: u64,
+    elapsed: Duration,
+    indeterminate: u64,
+    run_ended: bool,
+) -> Option<StopReason> {
+    if indeterminate >= limits.indeterminate {
+        Some(StopReason::Indeterminate)
+    } else if started >= limits.ops {
+        Some(StopReason::Ops)
+    } else if elapsed >= limits.time {
+        Some(StopReason::Time)
+    } else if run_ended {
+        Some(StopReason::End)
+    } else {
+        None
+    }
+}
+
+/// The cells a write sets: all of them with probability `insert_ratio` (or when there is
+/// one cell), else a random non-empty proper subset (spec §7.2).
+fn write_mask(cells: usize, insert_ratio: f64) -> u8 {
+    let all = ((1u16 << cells) - 1) as u8;
+    if cells == 1 || random_bool(insert_ratio) {
+        all
+    } else {
+        random_range(1..all)
+    }
+}
+
+/// A sealed row, ready to be recorded.
+#[derive(Debug)]
+pub struct SealedRow {
+    pub key: RowKey,
+    pub slot: usize,
+    pub wall_start_ms: u64,
+    pub wall_end_ms: u64,
+    pub ops: Vec<OpRecord>,
+    pub reads: u64,
+    pub writes_ok: u64,
+    pub writes_indet: u64,
+    pub errors: u64,
+    pub max_gap_ms: u64,
+    pub stop_reason: StopReason,
+    pub violations: Vec<Violation>,
+    pub sweep_ok: bool,
+}
+
+/// Everything the slots share.
+pub struct Checked {
+    pub session: Arc<Session>,
+    pub statements: Statements,
+    pub cli: Cli,
+    pub cells: usize,
+    pub exit: ExitCode,
+    pks: Box<dyn Distribution>,
+    gens: Mutex<GenMinter>,
+    clock: Instant,
+    stopped: AtomicBool,
+    workload_errors: AtomicU64,
+}
+
+impl Checked {
+    pub fn new(
+        session: Arc<Session>,
+        statements: Statements,
+        cli: Cli,
+        cells: usize,
+        pks: Box<dyn Distribution>,
+        gens: GenMinter,
+    ) -> Self {
+        Self {
+            session,
+            statements,
+            cli,
+            cells,
+            exit: ExitCode::default(),
+            pks,
+            gens: Mutex::new(gens),
+            clock: Instant::now(),
+            stopped: AtomicBool::new(false),
+            workload_errors: AtomicU64::new(0),
+        }
+    }
+
+    /// Ends the run: every slot finishes its current row and stops.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+
+    fn now_ns(&self) -> u64 {
+        self.clock.elapsed().as_nanos() as u64
+    }
+
+    fn limits(&self) -> Limits {
+        Limits {
+            ops: self.cli.ops_per_gen,
+            time: self.cli.max_gen_duration,
+            indeterminate: self.cli.max_indeterminate,
+        }
+    }
+
+    /// Counts an error caused by the tool or the profile; enough of them end the run, exit 3.
+    fn workload_error(&self, error: &OpError) {
+        let count = self.workload_errors.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::error!("workload error {count}: {}", error.message);
+        if count >= self.cli.max_workload_errors {
+            eprintln!(
+                "error: {count} errors caused by the tool or the profile; the last: {}",
+                error.message
+            );
+            self.exit.raise(3);
+            self.stop();
+        }
+    }
+
+    async fn mint(&self) -> RowKey {
+        let gen = loop {
+            if let Some(gen) = self.gens.lock().unwrap().next(unix_ms()) {
+                break gen;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        RowKey {
+            pk: self.pks.next_i64(),
+            gen,
+            ck: 0,
+        }
+    }
+}
+
+/// What a round knows about its row while it is live.
+struct Round {
+    state: RowState,
+    ops: Vec<OpRecord>,
+    budget: Budget,
+    started: u64,
+    reads: u64,
+    writes_ok: u64,
+    writes_indet: u64,
+    errors: u64,
+    violations: Vec<Violation>,
+    last_ok_ns: u64,
+    max_gap_ns: u64,
+    stop: Option<StopReason>,
+}
+
+impl Round {
+    fn succeeded(&mut self, end_ns: u64) {
+        self.max_gap_ns = self.max_gap_ns.max(end_ns.saturating_sub(self.last_ok_ns));
+        self.last_ok_ns = self.last_ok_ns.max(end_ns);
+    }
+}
+
+/// Runs slot `slot` until the run is stopped, sending every sealed row to `sealed`.
+pub async fn run_slot(
+    checked: Arc<Checked>,
+    slot: usize,
+    sealed: mpsc::UnboundedSender<SealedRow>,
+) {
+    let cli = &checked.cli;
+    // Slots tick at evenly spread phases, so the bursts of one loader interleave.
+    let offset = cli.burst_interval * slot as u32 / cli.slots as u32;
+    let (ticks_tx, ticks) = watch::channel(0u64);
+    let interval = cli.burst_interval;
+    let ticker = tokio::spawn(async move {
+        let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + offset, interval);
+        // A stalled loader skips the bursts it missed rather than firing them back to back.
+        timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            timer.tick().await;
+            ticks_tx.send_modify(|tick| *tick += 1);
+        }
+    });
+
+    let mut first = true;
+    while !checked.is_stopped() {
+        let key = checked.mint().await;
+        if first {
+            first = false;
+            if !fresh_row_is_absent(&checked, &key).await {
+                checked.exit.raise(2);
+                checked.stop();
+                break;
+            }
+        }
+        let row = run_round(&checked, slot, key, ticks.clone()).await;
+        if sealed.send(row).is_err() {
+            break;
+        }
+    }
+    ticker.abort();
+}
+
+/// Start-up check 4 (spec §15.3): a freshly minted row must not exist yet.
+async fn fresh_row_is_absent(checked: &Checked, key: &RowKey) -> bool {
+    for _ in 0..checked.cli.sweep_retries.max(1) {
+        match checked.statements.read(&checked.session, key).await {
+            Ok(seen) if seen.iter().all(|cell| *cell == Seen::Null) => return true,
+            Ok(seen) => {
+                eprintln!(
+                    "error: the fresh row pk {} gen {} already holds {seen:?}; \
+                     row keys are not unique",
+                    key.pk, key.gen
+                );
+                return false;
+            }
+            Err(error) => tracing::warn!("fresh-row check failed: {}", error.message),
+        }
+        tokio::time::sleep(checked.cli.sweep_backoff).await;
+    }
+    eprintln!("error: could not read a fresh row to check that it is absent");
+    false
+}
+
+async fn run_round(
+    checked: &Checked,
+    slot: usize,
+    key: RowKey,
+    ticks: watch::Receiver<u64>,
+) -> SealedRow {
+    let wall_start_ms = unix_ms();
+    let row_start = Instant::now();
+    let start_ns = checked.now_ns();
+    let round = Mutex::new(Round {
+        state: RowState::new(checked.cells),
+        ops: Vec::new(),
+        budget: Budget::new(*ticks.borrow()),
+        started: 0,
+        reads: 0,
+        writes_ok: 0,
+        writes_indet: 0,
+        errors: 0,
+        violations: Vec::new(),
+        last_ok_ns: start_ns,
+        max_gap_ns: 0,
+        stop: None,
+    });
+
+    let clients = (0..checked.cli.clients_per_row)
+        .map(|client| run_client(checked, &round, &key, client, ticks.clone(), row_start));
+    futures::future::join_all(clients).await;
+    // Drained: every operation of the row has returned.
+    let sweep_ok = sweep(checked, &round, &key).await;
+
+    let round = round.into_inner().unwrap();
+    let end_ns = checked.now_ns();
+    SealedRow {
+        key,
+        slot,
+        wall_start_ms,
+        wall_end_ms: unix_ms(),
+        ops: round.ops,
+        reads: round.reads,
+        writes_ok: round.writes_ok,
+        writes_indet: round.writes_indet,
+        errors: round.errors,
+        max_gap_ms: round
+            .max_gap_ns
+            .max(end_ns.saturating_sub(round.last_ok_ns))
+            / 1_000_000,
+        stop_reason: round.stop.unwrap_or(StopReason::End),
+        violations: round.violations,
+        sweep_ok,
+    }
+}
+
+async fn run_client(
+    checked: &Checked,
+    round: &Mutex<Round>,
+    key: &RowKey,
+    client: usize,
+    mut ticks: watch::Receiver<u64>,
+    row_start: Instant,
+) {
+    let limits = checked.limits();
+    loop {
+        // Mark the current tick seen before looking at the budget, so a tick that lands
+        // between the look and the wait still wakes this client.
+        let tick = *ticks.borrow_and_update();
+        let may_start = {
+            let mut round = round.lock().unwrap();
+            if round.stop.is_none() {
+                round.stop = should_stop(
+                    &limits,
+                    round.started,
+                    row_start.elapsed(),
+                    round.writes_indet,
+                    checked.is_stopped(),
+                );
+            }
+            if round.stop.is_some() {
+                return;
+            }
+            let may_start = round.budget.take(tick, checked.cli.burst_ops);
+            if may_start {
+                round.started += 1;
+            }
+            may_start
+        };
+        if !may_start {
+            if ticks.changed().await.is_err() {
+                return;
+            }
+            continue;
+        }
+
+        if random_bool(checked.cli.read_ratio) {
+            read(checked, round, key, client).await;
+        } else {
+            write(checked, round, key, client).await;
+        }
+    }
+}
+
+async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: usize) {
+    let mask = write_mask(checked.cells, checked.cli.insert_ratio);
+    let start_ns = checked.now_ns();
+    let wid = round.lock().unwrap().state.begin_write(mask, start_ns);
+    let result = checked
+        .statements
+        .write(
+            &checked.session,
+            key,
+            mask,
+            wid,
+            checked.cli.unavailable_is_fail,
+        )
+        .await;
+    let end_ns = checked.now_ns();
+
+    let mut round = round.lock().unwrap();
+    match result {
+        Ok(()) => {
+            round.state.end_write(wid, WriteEnd::Ok(end_ns));
+            round.writes_ok += 1;
+            round.succeeded(end_ns);
+        }
+        Err(error) => {
+            round.errors += 1;
+            match error.class {
+                Failure::Indeterminate => {
+                    round.state.end_write(wid, WriteEnd::Indeterminate);
+                    round.writes_indet += 1;
+                }
+                Failure::Fail => round.state.end_write(wid, WriteEnd::Fail(end_ns)),
+                Failure::WorkloadError | Failure::ReadFailed => {
+                    // Rejected outright: never recorded. Burned, so a cell showing it is a
+                    // phantom.
+                    round.state.end_write(wid, WriteEnd::Fail(end_ns));
+                    drop(round);
+                    checked.workload_error(&error);
+                    return;
+                }
+            }
+        }
+    }
+    let status = round.state.status(wid);
+    round.ops.push(OpRecord::Write {
+        client,
+        wid,
+        mask,
+        start_ns,
+        status,
+    });
+}
+
+/// One read, recorded and checked. Returns false when it failed and was not recorded.
+async fn read(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: usize) -> bool {
+    let floors = round.lock().unwrap().state.snapshot();
+    let start_ns = checked.now_ns();
+    let result = checked.statements.read(&checked.session, key).await;
+    let end_ns = checked.now_ns();
+
+    let mut guard = round.lock().unwrap();
+    let round = &mut *guard;
+    match result {
+        Ok(seen) => {
+            let violations = round.state.check_read(&floors, &seen);
+            round.state.end_read(&seen);
+            round.reads += 1;
+            round.succeeded(end_ns);
+            for violation in &violations {
+                println!(
+                    "VIOLATION {} pk {} gen {} cell c{}",
+                    violation.kind, key.pk, key.gen, violation.cell
+                );
+            }
+            round.violations.extend(violations);
+            round.ops.push(OpRecord::Read {
+                client,
+                start_ns,
+                end_ns,
+                seen,
+            });
+            true
+        }
+        Err(error) => {
+            round.errors += 1;
+            drop(guard);
+            if error.class == Failure::WorkloadError {
+                checked.workload_error(&error);
+            }
+            false
+        }
+    }
+}
+
+/// The one final read of a drained row, the only place a retry is allowed: nothing else
+/// runs on the row any more, and only the successful attempt is recorded.
+async fn sweep(checked: &Checked, round: &Mutex<Round>, key: &RowKey) -> bool {
+    let client = checked.cli.clients_per_row;
+    for attempt in 0..checked.cli.sweep_retries.max(1) {
+        if attempt > 0 {
+            tokio::time::sleep(checked.cli.sweep_backoff).await;
+        }
+        if read(checked, round, key, client).await {
+            return true;
+        }
+    }
+    false
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_gives_burst_ops_starts_per_tick_test() {
+        let mut budget = Budget::new(7);
+        assert!(!budget.take(7, 16), "a new row waits for the next tick");
+        for _ in 0..16 {
+            assert!(budget.take(8, 16));
+        }
+        assert!(
+            !budget.take(8, 16),
+            "the budget is empty until the next tick"
+        );
+        // Unused starts do not carry over: a tick resets the budget rather than adding to it.
+        assert!(budget.take(9, 16));
+        let mut taken = 1;
+        while budget.take(10, 16) {
+            taken += 1;
+        }
+        assert_eq!(
+            taken, 17,
+            "one left from tick 9 is gone; tick 10 gives a full 16"
+        );
+    }
+
+    #[test]
+    fn should_stop_test() {
+        let limits = Limits {
+            ops: 200,
+            time: Duration::from_secs(30),
+            indeterminate: 8,
+        };
+        let check = |started, secs, indet, global| {
+            should_stop(&limits, started, Duration::from_secs(secs), indet, global)
+        };
+        assert_eq!(check(199, 29, 7, false), None);
+        assert_eq!(check(200, 0, 0, false), Some(StopReason::Ops));
+        assert_eq!(check(10, 30, 0, false), Some(StopReason::Time));
+        assert_eq!(check(10, 0, 8, false), Some(StopReason::Indeterminate));
+        assert_eq!(check(10, 0, 0, true), Some(StopReason::End));
+        // The row's own limit names the reason even when the run ends at the same moment.
+        assert_eq!(check(10, 0, 8, true), Some(StopReason::Indeterminate));
+        assert_eq!(StopReason::Indeterminate.as_str(), "indeterminate");
+    }
+
+    #[test]
+    fn write_masks_test() {
+        for _ in 0..1000 {
+            let mask = write_mask(3, 0.0);
+            assert!(mask != 0 && mask != 0b111, "a partial update: {mask:#b}");
+            assert_eq!(write_mask(3, 1.0), 0b111);
+            assert_eq!(write_mask(1, 0.0), 0b1, "one cell: always a full insert");
+        }
+    }
+
+    #[test]
+    fn the_highest_exit_code_wins_test() {
+        let exit = ExitCode::default();
+        exit.raise(1);
+        exit.raise(3);
+        exit.raise(2);
+        assert_eq!(exit.get(), 3);
+    }
+}

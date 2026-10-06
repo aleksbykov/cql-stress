@@ -167,6 +167,16 @@ impl Cli {
             cli.duration.is_some() || cli.ops.is_some(),
             "give --duration, or -n with --mode bulk"
         );
+        // A cell expiring mid-round would look exactly like a lost write (spec §7.4).
+        let longest_round = cli.max_gen_duration
+            + cli.request_timeout
+            + (cli.sweep_backoff + cli.request_timeout) * cli.sweep_retries;
+        anyhow::ensure!(
+            cli.ttl == 0 || Duration::from_secs(cli.ttl.into()) >= longest_round * 10,
+            "--ttl {} is shorter than 10 rounds of the longest possible length ({}s)",
+            cli.ttl,
+            (longest_round * 10).as_secs()
+        );
         Ok(cli)
     }
 
@@ -293,10 +303,14 @@ mod tests {
             "--duration 1m --ssl-ca ca.pem",
             "--duration 1m --ssl --ssl-cert c.pem",
             "--duration 1m --ssl --ssl-key k.pem",
+            "--duration 1m --ttl 300",
         ] {
             assert!(parse(bad).is_err(), "{bad:?} must be rejected");
         }
         assert!(parse("--mode bulk -n 10").is_ok());
+        // 10 × (30 s + 5 s + 10 × (1 s + 5 s)) = 950 s.
+        assert!(parse("--duration 1m --ttl 950").is_ok());
+        assert!(parse("--duration 1m --ttl 949").is_err());
         assert!(parse("--duration 250ms --nodes a,b:9043 --consistency local-quorum").is_ok());
     }
 

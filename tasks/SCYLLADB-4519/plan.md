@@ -275,20 +275,28 @@ once at start-up (the read and one write per non-empty mask, up to 255 with 8 ce
 
 **Files:** Create: `src/bin/cql-stress-sc-verify/slot.rs`; Modify: `main.rs`
 
-**Internals:** `async fn run_slot(..)`: mint, bursts (a budget of `--burst-ops`
-starts per `--burst-interval`, offset `i × interval / slots`), stop on ops, time or
-indeterminate, drain, sweep (`--sweep-retries`, the only retry), seal. Each op
-takes floors, then its start time, then sends; at the end it takes its end
-time, checks, then updates the state (spec timing rule). `fn should_stop(..)` is
-pure. Fresh-row check (start-up item 4): the first read of each slot's first row
-must find the row absent.
+**Internals:** a shared `Checked` (session, `Statements`, settings, pk distribution,
+`Mutex<GenMinter>`, process clock, stop flag, `ExitCode` where the highest code wins,
+workload-error counter). `run_slot(i)`: a ticker at phase `i × interval / slots`
+(`MissedTickBehavior::Skip`) advances a `watch` tick counter; the first row is checked
+absent (start-up check 4, else exit 2); then rounds until stopped. A round: `Mutex<Round>`
+(`RowState`, `OpRecord`s, a `Budget` that refills lazily on a new tick and starts empty, so
+a new row waits for the next tick, counters, max gap) and `clients_per_row` client futures
+(`join_all` = drain). A client marks the tick seen, then under the lock checks
+`should_stop` and takes a start; it waits on `changed()` when the budget is empty. A write
+takes its start time, `begin_write`, sends, takes its end time, then locks and records. A
+read snapshots, unlocks, takes its start time, sends, takes its end time, then locks,
+checks and records. The sweep is client `clients_per_row`, retried with backoff. Sealed rows
+go over an mpsc channel. `main` (`--mode verify`) stops at `--duration`, awaits the slots
+(a panic → exit 3), and exits with the highest code (a violation → 1). `--ttl` must cover 10
+of the longest rounds. `history` keeps its dead-code allow until task 14.
 
-- [ ] Write tests: `should_stop` for each `stop_reason`; the burst budget gives 16 starts per tick.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code; `--mode verify` runs slots until `--duration`.
-- [ ] Remove the temporary `#[allow(dead_code)]` on the modules in `main.rs`.
-- [ ] Run verify; a 10 s compose run exits 0.
-- [ ] Commit `feat: run checked slots in bursts [SCYLLADB-4519]`.
+- [x] Write tests: `should_stop` for each `stop_reason`; the burst budget gives 16 starts per tick.
+- [x] Run them and confirm the failure. (They failed to compile; after the code, five guarded breaks each failed a test: an accumulating budget, a new row bursting at once, `end` before the row's own limits, a full mask as a partial update, exit codes overwritten.)
+- [x] Write the code; `--mode verify` runs slots until `--duration`.
+- [x] Remove the temporary `#[allow(dead_code)]` on the modules in `main.rs` (all except `history`, whose `CheckFile` is used from task 14).
+- [x] Run verify; a 10 s compose run exits 0. (128 rows of 41 operations with `--ops-per-gen 40`, 0 violations, every sweep ok; the schema pytest now runs real slots.)
+- [x] Commit `feat: run checked slots in bursts [SCYLLADB-4519]`.
 
 ## Task 14 — rows.jsonl and check files on disk (T6)
 
