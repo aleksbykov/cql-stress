@@ -3,6 +3,7 @@
 
 mod cli;
 mod profile;
+mod startup;
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
@@ -29,15 +30,16 @@ async fn main() -> Result<()> {
     let tls = cli
         .tls_context()
         .unwrap_or_else(|err| exit_setup_failure(err));
+    let session = startup::connect(&cli, tls)
+        .await
+        .unwrap_or_else(|err| exit_setup_failure(err));
+    startup::startup(&session, &profile, &cli)
+        .await
+        .unwrap_or_else(|err| exit_setup_failure(err));
     println!(
-        "{cli:#?}\nTLS: {}",
-        if tls.is_some() { "on" } else { "off" }
+        "Start-up checks passed: {}.{} is strongly consistent and matches the profile",
+        profile.keyspace, profile.table
     );
-    println!("{}", profile.keyspace_ddl());
-    println!("{}", profile.table_ddl(&profile.table));
-    if profile.bulk_table_name() != profile.table {
-        println!("{}", profile.table_ddl(profile.bulk_table_name()));
-    }
     Ok(())
 }
 

@@ -16,6 +16,7 @@ from test_cs_strong_consistency import (
     run_strong_consistency,
     run_unsupported_consistency_level_is_rejected,
 )
+from test_cs_sc_verify import run_schema as run_sc_verify_schema
 
 
 # Utils for test cases
@@ -244,3 +245,10 @@ def test_strong_consistency_rejects_eventually_consistent_keyspace(
     run_eventually_consistent_keyspace_is_rejected(
         node=strong_consistency_node, cql_stress=cql_stress,
         keyspace=strong_consistency_keyspace)
+
+
+def test_strong_consistency_sc_verify_schema(
+        strong_consistency_node, strong_consistency_session, strong_consistency_keyspace,
+        tmp_path):
+    run_sc_verify_schema(node=strong_consistency_node, session=strong_consistency_session,
+                         keyspace=strong_consistency_keyspace, tmp_path=tmp_path)

@@ -148,13 +148,19 @@ they go into DDL verbatim; unknown keys rejected), `keyspace_ddl()`, `table_ddl(
 **Internals:** `fn diff(profile_cols, live_cols) -> Vec<String>` (pure, `"c1: table has text, profile says int"`);
 `async fn startup(session, profile) -> Result<(), Exit2>`: run `IF NOT EXISTS` DDL,
 call `keyspace_consistency_mode`/`unavailable_error`, read `system_schema.columns`, diff.
-`main` maps a start-up failure to exit 2.
+`main` maps a start-up failure to exit 2. Order: keyspace DDL, then the SC check, and only
+then the table DDL and the diff, so no table goes into a keyspace that is not strongly
+consistent. `connect(cli, tls)` builds the session from `--nodes`, the credentials and
+TLS. The None/Eventual wording of the mode (four lines) is repeated from cassandra-stress
+rather than moved into the library. The pytest also covers an eventually consistent
+keyspace (exit 2, the diagnostic code, no table created) and a second start over an
+existing schema.
 
-- [ ] Write tests: `diff` on equal, type-changed, missing and extra columns; pytest `run_schema`: an empty keyspace gets created; an altered table exits 2 with the diff.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify and the new pytest.
-- [ ] Commit `feat: create and check the sc-verify schema at start-up [SCYLLADB-4519]`.
+- [x] Write tests: `diff` on equal, type-changed, missing and extra columns; pytest `run_schema`: an empty keyspace gets created; an altered table exits 2 with the diff.
+- [x] Run them and confirm the failure. (The unit tests failed to compile first; the pytest was written after the code and asserts the exact diff line and code.)
+- [x] Write the code.
+- [x] Run verify and the new pytest.
+- [x] Commit `feat: create and check the sc-verify schema at start-up [SCYLLADB-4519]`.
 
 ## Task 8 — checked session settings (T4, high risk first)
 
