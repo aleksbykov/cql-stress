@@ -2,6 +2,7 @@
 //! Design: tasks/SCYLLADB-4519/spec.md.
 
 mod cli;
+mod ops;
 mod profile;
 mod startup;
 
@@ -34,6 +35,10 @@ async fn main() -> Result<()> {
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
     startup::startup(&session, &profile, &cli)
+        .await
+        .unwrap_or_else(|err| exit_setup_failure(err));
+    // The slots' read; preparing it here also proves the checked statements are accepted.
+    ops::prepare_checked(&session, &profile.read_query())
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
     println!(

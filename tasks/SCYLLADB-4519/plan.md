@@ -168,13 +168,17 @@ existing schema.
 
 **Internals:** `fn checked_profile(cl, request_timeout) -> ExecutionProfile` with
 `FallthroughRetryPolicy`, `speculative_execution_policy(None)`, the given CL and timeout;
-`fn prepare_checked(session, query)` marks each statement not idempotent.
+`fn prepare_checked(session, query)` marks each statement not idempotent. `connect` sets
+the profile as the checked session's default; `main` prepares the checked read
+(`Profile::read_query`) at start-up. Driver check (scylla 1.9 `client/execution.rs`): the
+only path that moves to another node without the retry policy is a failure to get a
+connection, before anything is sent.
 
-- [ ] Write a test that reads `get_retry_policy`, `get_speculative_execution_policy` and the consistency back from the profile, and checks `is_idempotent()` on a prepared statement.
-- [ ] Run it and confirm the failure.
-- [ ] Write the code. If the driver cannot express any of it, stop and ask.
-- [ ] Run verify.
-- [ ] Commit `feat: build the non-retrying checked execution profile [SCYLLADB-4519]`.
+- [x] Write a test that reads `get_retry_policy`, `get_speculative_execution_policy` and the consistency back from the profile, and checks `is_idempotent()` on a prepared statement.
+- [x] Run it and confirm the failure. (It failed to compile; after the code, turning on speculative execution and marking statements idempotent each failed it.)
+- [x] Write the code. If the driver cannot express any of it, stop and ask.
+- [x] Run verify.
+- [x] Commit `feat: build the non-retrying checked execution profile [SCYLLADB-4519]`.
 
 ## Task 9 — cell encoders (T4)
 

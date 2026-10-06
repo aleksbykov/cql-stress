@@ -9,6 +9,7 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::metadata::ConsistencyMode;
 
 use crate::cli::Cli;
+use crate::ops::checked_profile;
 use crate::profile::Profile;
 
 /// One column as `system_schema.columns` describes it.
@@ -19,8 +20,12 @@ pub struct Column {
     pub kind: String,
 }
 
+/// The checked session: every statement on it runs with [`checked_profile`].
 pub async fn connect(cli: &Cli, tls: Option<SslContext>) -> Result<Session> {
-    let mut builder = SessionBuilder::new().known_nodes(&cli.nodes);
+    let profile = checked_profile(cli.consistency, cli.request_timeout);
+    let mut builder = SessionBuilder::new()
+        .known_nodes(&cli.nodes)
+        .default_execution_profile_handle(profile.into_handle());
     if let (Some(user), Some(password)) = (&cli.user, &cli.password) {
         builder = builder.user(user, password);
     }

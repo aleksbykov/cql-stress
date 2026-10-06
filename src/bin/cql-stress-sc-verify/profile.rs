@@ -119,6 +119,17 @@ impl Profile {
         )
     }
 
+    /// The checked read: every cell of one row by its full key.
+    pub fn read_query(&self) -> String {
+        let cells: Vec<String> = (0..self.cells.len()).map(|i| format!("c{i}")).collect();
+        format!(
+            "SELECT {} FROM {}.{} WHERE pk = ? AND gen = ? AND ck = ?",
+            cells.join(", "),
+            self.keyspace,
+            self.table
+        )
+    }
+
     pub fn bulk_table_name(&self) -> &str {
         self.bulk_table.as_deref().unwrap_or(&self.table)
     }
