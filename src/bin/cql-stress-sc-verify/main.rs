@@ -525,8 +525,9 @@ impl Checking {
             .flatten()
             .and_then(|text| history::make_canary(&text));
 
+        let seq = closed.seq;
         let job = Job {
-            seq: closed.seq,
+            seq,
             path: closed.path.clone(),
             rows: closed.rows.len(),
             archive_dir: checked
@@ -541,8 +542,10 @@ impl Checking {
             Err(_) => skip(checked, recorder, totals, closed),
         }
 
+        // A canary is named after the file it was made from, so its name is unique across
+        // restarts too.
         if let Some(canary) = canary {
-            let n = self.files / checked.cli.canary_every;
+            let n = seq;
             let path = checked
                 .cli
                 .history_dir

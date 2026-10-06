@@ -236,6 +236,46 @@ fn canary_of(block: &[&str]) -> Option<String> {
     Some(out)
 }
 
+/// The highest check-file number an earlier process in `dir` used, so a restarted process
+/// never reuses one: a file still in `sealed/`, kept in `archive/<n>/`, or (with
+/// `--checker on`, once checked and deleted) named only by `rows.jsonl`. Reusing a number
+/// would let the new run overwrite or delete the earlier run's evidence.
+fn last_file_number(dir: &Path) -> Result<Option<u64>> {
+    let numbered = |sub: &str| -> Result<Vec<u64>> {
+        let path = dir.join(sub);
+        Ok(std::fs::read_dir(&path)
+            .with_context(|| format!("Failed to list {}", path.display()))?
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.trim_end_matches(".jsonl").parse::<u64>().ok()
+            })
+            .collect())
+    };
+    #[derive(serde::Deserialize)]
+    struct FileField {
+        file: String,
+    }
+    let in_rows = match std::fs::read_to_string(dir.join("rows.jsonl")) {
+        Ok(rows) => rows
+            .lines()
+            .filter_map(|line| {
+                serde_json::from_str::<FileField>(line)
+                    .ok()?
+                    .file
+                    .parse()
+                    .ok()
+            })
+            .collect(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(err).context("Failed to read rows.jsonl"),
+    };
+    Ok(numbered("sealed")?
+        .into_iter()
+        .chain(numbered("archive")?)
+        .chain(in_rows)
+        .max())
+}
+
 /// One line of `rows.jsonl` (spec §14.3).
 #[derive(Serialize, Debug, Clone)]
 pub struct RowLine {
@@ -329,21 +369,7 @@ impl Recorder {
             .with_context(|| format!("Failed to create {}", sealed.display()))?;
         std::fs::create_dir_all(dir.join("archive"))
             .with_context(|| format!("Failed to create {}", dir.join("archive").display()))?;
-        // A restarted process continues the numbering, so it never overwrites the evidence
-        // of the previous one.
-        let next_seq = std::fs::read_dir(&sealed)
-            .with_context(|| format!("Failed to list {}", sealed.display()))?
-            .filter_map(|entry| {
-                entry
-                    .ok()?
-                    .path()
-                    .file_stem()?
-                    .to_str()?
-                    .parse::<u64>()
-                    .ok()
-            })
-            .max()
-            .map_or(0, |seq| seq + 1);
+        let next_seq = last_file_number(dir)?.map_or(0, |seq| seq + 1);
         let append = |name: &str| {
             std::fs::OpenOptions::new()
                 .create(true)
@@ -713,6 +739,32 @@ mod tests {
             make_canary(&file.lines().take(3).collect::<Vec<_>>().join("\n")).is_none(),
             "no read"
         );
+    }
+
+    /// A restarted run never reuses a file number, wherever the earlier file went: with
+    /// `--checker on` a checked file leaves `sealed/` (deleted or archived), and reusing its
+    /// number would let the new run overwrite or delete the earlier run's evidence.
+    #[test]
+    fn a_restart_never_reuses_a_file_number_test() {
+        let dir = std::env::temp_dir().join(format!("sc-verify-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sealed")).unwrap();
+        std::fs::create_dir_all(dir.join("archive/7")).unwrap();
+        std::fs::create_dir_all(dir.join("archive/canary-12")).unwrap();
+        std::fs::write(dir.join("sealed/3.jsonl"), "").unwrap();
+        std::fs::write(dir.join("sealed/canary-12.jsonl"), "").unwrap();
+        // File 9 was checked ok and deleted; only rows.jsonl still names it.
+        std::fs::write(
+            dir.join("rows.jsonl"),
+            "{\"pk\":1,\"file\":\"9\",\"key\":0}\n",
+        )
+        .unwrap();
+
+        let mut recorder = Recorder::new(&dir, 1, 50, Duration::from_secs(300), true).unwrap();
+        recorder.record(&sealed(0, 0)).unwrap();
+        let closed = recorder.finish().unwrap().unwrap();
+        assert_eq!(closed.seq, 10);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// With `--checker on`, the lines wait for the checker; a closed file carries them.
