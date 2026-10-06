@@ -2,9 +2,6 @@
 //! Design: tasks/SCYLLADB-4519/spec.md.
 
 mod cli;
-// `CheckFile` gets its caller with the check files on disk (plan task 14), which removes
-// this allow.
-#[allow(dead_code)]
 mod history;
 mod invariants;
 mod keys;
@@ -22,6 +19,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use cli::{Cli, Mode};
+use history::Recorder;
 use keys::GenMinter;
 use profile::Profile;
 use slot::Checked;
@@ -78,6 +76,13 @@ async fn main() -> Result<()> {
         gens.base()
     );
     let duration = cli.duration.expect("--mode verify requires --duration");
+    let mut recorder = Recorder::new(
+        &cli.history_dir,
+        profile.cells.len(),
+        cli.check_rows,
+        cli.check_age,
+    )
+    .unwrap_or_else(|err| exit_setup_failure(err));
     let checked = Arc::new(Checked::new(
         Arc::new(session),
         statements,
@@ -123,6 +128,23 @@ async fn main() -> Result<()> {
         rows += 1;
         ops += row.ops.len();
         violations += row.violations.len();
+        match recorder.record(&row) {
+            Ok(Some(archive)) => println!(
+                "Row pk {} gen {} archived in {archive}",
+                row.key.pk, row.key.gen
+            ),
+            Ok(None) => {}
+            Err(err) => {
+                // Evidence that cannot be written makes every verdict unverifiable.
+                eprintln!("error: failed to record a sealed row: {err:#}");
+                checked.exit.raise(3);
+                checked.stop();
+            }
+        }
+    }
+    if let Err(err) = recorder.finish() {
+        eprintln!("error: failed to close the history files: {err:#}");
+        checked.exit.raise(3);
     }
     for slot in slots {
         if slot.await.is_err() {

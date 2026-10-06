@@ -124,7 +124,7 @@ fn write_mask(cells: usize, insert_ratio: f64) -> u8 {
 }
 
 /// A sealed row, ready to be recorded.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SealedRow {
     pub key: RowKey,
     pub slot: usize,

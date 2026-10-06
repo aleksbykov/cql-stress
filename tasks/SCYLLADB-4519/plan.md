@@ -302,15 +302,19 @@ of the longest rounds. `history` keeps its dead-code allow until task 14.
 
 **Files:** Modify: `slot.rs`, `history.rs`, `main.rs`; Modify: `tools/test_cs_sc_verify.py`, `tools/cql-stress-cassandra-stress-ci.py`
 
-**Internals:** `struct RowRecord` (spec `rows.jsonl` shape); one shared open
-`CheckFile` per process, rotated on `--check-rows` or `--check-age` into
-`sealed/<seq>.jsonl`; a row with a violation is copied to `archive/<seq>/`.
+**Internals:** `struct Recorder` in `history.rs` (`new(dir, cells, check_rows,
+check_age)`, `record(&SealedRow) -> Option<archive dir>`, `finish`): creates `sealed/` and
+`archive/`, continues the `sealed/<seq>` numbering after a restart, appends to
+`rows.jsonl` (flushed per row; `gen` and `file` as strings; `verdict` is `violation` or
+`unchecked`), rotates on `--check-rows`/`--check-age`. A row with a violation closes its
+check file at once and copies it to `archive/<seq>/<seq>.jsonl`. `main` records every
+sealed row; a failure to record is exit 3. The pytest helper passes `--history-dir`.
 
-- [ ] Write pytest `run_verify_quiet`: 60 s, `--checker off`; every row has ≥ 150 ops, `verdict` `unchecked`, 0 violations.
-- [ ] Run it and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify and the pytest.
-- [ ] Commit `feat: record sealed rows and check files [SCYLLADB-4519]`.
+- [x] Write pytest `run_verify_quiet`: 60 s, `--checker off`; every row has ≥ 150 ops, `verdict` `unchecked`, 0 violations.
+- [x] Run it and confirm the failure. (The Recorder unit tests failed to compile first; the pytest was written after the code.)
+- [x] Write the code.
+- [x] Run verify and the pytest. (60 s on the SC node: 160 rows, 128 full at 201 operations, 12.9 s each, read share 0.503, 0 violations.)
+- [x] Commit `feat: record sealed rows and check files [SCYLLADB-4519]`.
 
 ## Task 15 — report and SCV lines (T7)
 

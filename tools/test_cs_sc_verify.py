@@ -7,7 +7,9 @@ They need the `strong-consistency` compose node and `cql-stress-sc-verify` on PA
 them with the shared fixtures, which skip when the node cannot do strong consistency.
 """
 
+import json
 import subprocess
+from pathlib import Path
 
 from test_cs_strong_consistency import UNAVAILABLE_CODE, keyspace_consistency
 
@@ -27,11 +29,13 @@ def write_profile(path, keyspace: str, cells="[bigint, text, blob]") -> str:
     return str(path)
 
 
-def sc_verify(node, profile: str, *args: str) -> subprocess.CompletedProcess:
+def sc_verify(node, profile: str, *args: str, duration="1s") -> subprocess.CompletedProcess:
+    """Runs a checked stream; its history goes next to the profile."""
+    history = Path(profile).parent / "history"
     cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
-           "--mode", "verify", "--duration", "1s", *args]
+           "--mode", "verify", "--duration", duration, "--history-dir", str(history), *args]
     print(" ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     print(result.stdout, result.stderr, sep="\n")
     return result
 
@@ -82,3 +86,30 @@ def run_schema(node, session, keyspace: str, tmp_path):
         assert not columns(session, eventual, "reg"), "no table may go into a non-SC keyspace"
     finally:
         session.execute(f"DROP KEYSPACE IF EXISTS {eventual}")
+
+
+def run_verify_quiet(node, session, keyspace: str, tmp_path):
+    """A quiet 60 s checked run: every row is recorded, unchecked and free of violations."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    result = sc_verify(node, profile, duration="60s")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+
+    history = tmp_path / "history"
+    rows = [json.loads(line) for line in (history / "rows.jsonl").read_text().splitlines()]
+    assert rows, "no row was sealed"
+    for row in rows:
+        assert row["invariants"] == "ok" and row["verdict"] == "unchecked", row
+        assert row["sweep"] == "ok", row
+        assert isinstance(row["gen"], str) and int(row["gen"]) >= 1 << 60, row
+
+    # A row cut short by the end of the run has fewer; every row that ran to --ops-per-gen
+    # (200 started, plus the sweep) is long enough to be worth checking.
+    full = [row for row in rows if row["stop_reason"] == "ops"]
+    assert full, "no row reached --ops-per-gen in 60 s"
+    short = [row for row in full if row["ops"] < 150]
+    assert not short, f"rows with fewer than 150 recorded operations: {short}"
+
+    # Every row can be found in its check file by its key.
+    for row in rows:
+        check_file = (history / "sealed" / f"{row['file']}.jsonl").read_text()
+        assert f'# key {row["key"]} pk {row["pk"]} gen "{row["gen"]}" ck 0' in check_file, row

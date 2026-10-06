@@ -17,6 +17,7 @@ from test_cs_strong_consistency import (
     run_unsupported_consistency_level_is_rejected,
 )
 from test_cs_sc_verify import run_schema as run_sc_verify_schema
+from test_cs_sc_verify import run_verify_quiet as run_sc_verify_quiet
 
 
 # Utils for test cases
@@ -252,3 +253,10 @@ def test_strong_consistency_sc_verify_schema(
         tmp_path):
     run_sc_verify_schema(node=strong_consistency_node, session=strong_consistency_session,
                          keyspace=strong_consistency_keyspace, tmp_path=tmp_path)
+
+
+def test_strong_consistency_sc_verify_quiet(
+        strong_consistency_node, strong_consistency_session, strong_consistency_keyspace,
+        tmp_path):
+    run_sc_verify_quiet(node=strong_consistency_node, session=strong_consistency_session,
+                        keyspace=strong_consistency_keyspace, tmp_path=tmp_path)
