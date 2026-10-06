@@ -284,7 +284,8 @@ pub struct RowLine {
     ck: i32,
     slot: usize,
     file: String,
-    key: usize,
+    /// The row's key in its check file.
+    pub key: usize,
     wall_start_ms: u64,
     wall_end_ms: u64,
     ops: usize,

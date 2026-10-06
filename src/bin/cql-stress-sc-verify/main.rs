@@ -602,7 +602,7 @@ impl Checking {
                 _ = &mut deadline => break,
             }
         }
-        self.queue.abort();
+        self.queue.abort().await;
         let mut left: Vec<_> = self.pending.drain().map(|(_, closed)| closed).collect();
         left.sort_by_key(|closed| closed.seq);
         for closed in left {
@@ -625,6 +625,13 @@ fn canary_verdict(
     verdicts: &FileVerdicts,
 ) {
     let archive = checked.cli.history_dir.join(format!("archive/canary-{n}"));
+    if !verdicts.ran {
+        // The checker could not even start: no answer, so no evidence either way.
+        totals.canaries_skipped += 1;
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(&archive);
+        return;
+    }
     let result = match verdicts.per_key.first() {
         Some(RowResult::Illegal) => "illegal",
         Some(RowResult::Ok) => "ok",
@@ -664,7 +671,12 @@ fn file_verdicts(
     }
     let (mut ok, mut illegal, mut unknown) = (0, 0, 0);
     let mut all_ok = true;
-    for (row, result) in closed.rows.iter().zip(&verdicts.per_key) {
+    for row in &closed.rows {
+        let result = verdicts
+            .per_key
+            .get(row.line.key)
+            .copied()
+            .unwrap_or(RowResult::Unknown);
         let checker = match result {
             RowResult::Ok => {
                 ok += 1;

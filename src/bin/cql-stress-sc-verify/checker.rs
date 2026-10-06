@@ -18,13 +18,24 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Start-up: the checker must run, and refuse empty input with exit 2 ("no input"), as
 /// porcupine_checker does. Anything else, a hang included, means it cannot check the run.
 pub async fn probe(bin: &Path, timeout: Duration) -> Result<()> {
-    let mut child = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    // SAFETY: setpgid is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("Cannot run the checker {}", bin.display()))?;
+    // A probe that hangs is killed with everything it started when this guard drops.
+    let mut group = ProcessGroup(child.id().map(|pid| pid as i32));
     let status = tokio::time::timeout(timeout, child.wait())
         .await
         .with_context(|| {
@@ -34,6 +45,7 @@ pub async fn probe(bin: &Path, timeout: Duration) -> Result<()> {
             )
         })?
         .with_context(|| format!("The checker {} failed", bin.display()))?;
+    group.0 = None;
     anyhow::ensure!(
         status.code() == Some(2),
         "The checker {} answered empty input with {status}, not exit 2: is it porcupine_checker?",
@@ -67,6 +79,8 @@ pub struct FileVerdicts {
     pub per_key: Vec<RowResult>,
     /// The child ran out of time and was killed.
     pub killed: bool,
+    /// The checker started; `false` when it could not run at all, which is no answer.
+    pub ran: bool,
 }
 
 #[derive(Deserialize)]
@@ -93,7 +107,9 @@ pub async fn check_file(
         .with_context(|| format!("Failed to create {}", archive_dir.display()))?;
     let stdin =
         std::fs::File::open(file).with_context(|| format!("Failed to open {}", file.display()))?;
-    let stderr = std::fs::File::create(archive_dir.join("checker.stderr"))?;
+    let stderr_path = archive_dir.join("checker.stderr");
+    let stderr = std::fs::File::create(&stderr_path)
+        .with_context(|| format!("Failed to create {}", stderr_path.display()))?;
     let data_limit = cfg.mem.saturating_mul(5) / 4;
     let mut command = Command::new(&cfg.bin);
     command
@@ -108,9 +124,11 @@ pub async fn check_file(
         .stdout(Stdio::piped())
         .stderr(stderr)
         .kill_on_drop(true);
-    // SAFETY: only async-signal-safe calls (nice, setrlimit) between fork and exec.
+    // SAFETY: only async-signal-safe calls (setpgid, nice, setrlimit) between fork and exec.
     unsafe {
         command.pre_exec(move || {
+            // Its own process group, so a kill reaches anything it started too.
+            libc::setpgid(0, 0);
             libc::nice(10);
             let limit = libc::rlimit {
                 rlim_cur: data_limit,
@@ -125,6 +143,7 @@ pub async fn check_file(
     let mut child = command
         .spawn()
         .with_context(|| format!("Cannot run the checker {}", cfg.bin.display()))?;
+    let mut group = ProcessGroup(child.id().map(|pid| pid as i32));
 
     let mut per_key = vec![RowResult::Unknown; rows];
     let mut lines = BufReader::new(child.stdout.take().expect("stdout is piped")).lines();
@@ -146,12 +165,46 @@ pub async fn check_file(
             }
         }
     };
-    let killed = tokio::time::timeout(cfg.timeout, read_all).await.is_err();
+    // The reading and the wait share the time limit: a child that closes its stdout and
+    // keeps running must not hold a worker beyond --checker-timeout either.
+    let finished = tokio::time::timeout(cfg.timeout, async {
+        read_all.await;
+        let _ = child.wait().await;
+    })
+    .await;
+    let killed = finished.is_err();
     if killed {
-        let _ = child.kill().await;
+        group.kill();
+        let _ = child.wait().await;
     }
-    let _ = child.wait().await;
-    Ok(FileVerdicts { per_key, killed })
+    // Exited on its own: never signal its group id again, it may be reused.
+    group.0 = None;
+    Ok(FileVerdicts {
+        per_key,
+        killed,
+        ran: true,
+    })
+}
+
+/// The process group of a running checker child; dropping it (a worker aborted mid-check)
+/// kills the whole group, the child and anything it started.
+struct ProcessGroup(Option<i32>);
+
+impl ProcessGroup {
+    fn kill(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            // SAFETY: plain syscall on a group this process created.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 /// One check file for a worker.
@@ -194,6 +247,7 @@ impl CheckQueue {
                                 FileVerdicts {
                                     per_key: vec![RowResult::Unknown; job.rows],
                                     killed: false,
+                                    ran: false,
                                 }
                             });
                         if results_tx.send((job.seq, verdicts)).is_err() {
@@ -240,9 +294,14 @@ impl CheckQueue {
     }
 
     /// Stops the workers now; their children are killed.
-    pub fn abort(&self) {
+    /// Stops the workers now and waits until they are gone, so their children are killed
+    /// before the caller moves the files those children were writing.
+    pub async fn abort(&mut self) {
         for worker in &self.workers {
             worker.abort();
+        }
+        for worker in self.workers.drain(..) {
+            let _ = worker.await;
         }
     }
 }
@@ -341,6 +400,48 @@ pub(crate) mod tests {
             "killed at --checker-timeout"
         );
 
+        // Closing stdout ends the reading, not the child: the wait is under the timeout too.
+        let quiet = fake_checker(
+            "quiet",
+            &format!("cat >/dev/null\n{OK_0}\nexec >&-\nsleep 30"),
+        );
+        let start = std::time::Instant::now();
+        let verdicts = check_file(
+            &config(quiet, Duration::from_millis(500)),
+            &file,
+            2,
+            &archive,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdicts.per_key, [RowResult::Ok, RowResult::Unknown]);
+        assert!(verdicts.killed && start.elapsed() < Duration::from_secs(5));
+
+        // The whole process group goes, not just the checker: its own children too.
+        let forks = fake_checker(
+            "forks",
+            &format!("cat >/dev/null\n{OK_0}\nsleep 30 &\necho $! > \"$2/child.pid\"\nwait"),
+        );
+        check_file(
+            &config(forks, Duration::from_millis(500)),
+            &file,
+            2,
+            &archive,
+        )
+        .await
+        .unwrap();
+        let pid: i32 = std::fs::read_to_string(archive.join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let alive = unsafe { libc::kill(pid, 0) } == 0
+            && !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .unwrap_or_default()
+                .contains(") Z ");
+        assert!(!alive, "the checker's child {pid} survived the kill");
+
         let crashes = fake_checker("crashes", &format!("cat >/dev/null\n{OK_0}\nkill -9 $$"));
         let verdicts = check_file(&config(crashes, Duration::from_secs(5)), &file, 2, &archive)
             .await
@@ -419,7 +520,7 @@ pub(crate) mod tests {
     async fn a_full_queue_refuses_test() {
         let (file, _) = check_file_fixture("queue-full", 2);
         let hangs = fake_checker("queue-full", "cat >/dev/null\nsleep 30");
-        let queue = CheckQueue::start(config(hangs, Duration::from_secs(60)), 1, 1);
+        let mut queue = CheckQueue::start(config(hangs, Duration::from_secs(60)), 1, 1);
         queue.submit(job(&file, 0)).unwrap();
         // Let the worker take the first file and hang on it.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -427,7 +528,7 @@ pub(crate) mod tests {
         assert_eq!(queue.waiting(), 1);
         let refused = queue.submit(job(&file, 2)).unwrap_err();
         assert_eq!(refused.seq, 2, "the refused job comes back");
-        queue.abort();
+        queue.abort().await;
     }
 
     #[tokio::test]
