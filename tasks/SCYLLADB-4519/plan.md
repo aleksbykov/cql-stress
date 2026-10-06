@@ -185,13 +185,15 @@ connection, before anything is sent.
 **Files:** Modify: `src/bin/cql-stress-sc-verify/ops.rs`
 
 **Internals:** `fn encode(cell: CellType, wid: u64, size: usize) -> CqlValue`;
-`fn decode(cell, &CqlValue) -> Result<u64>`; `int` refuses wid ≥ 2^31.
+`fn decode(cell, size, &CqlValue) -> Result<u64>` is strict: the value must equal
+`encode` of the wid it claims, and 0 is never a wid. `int` refuses wid ≥ 2^31, `bigint`
+wid ≥ 2^63. Until task 13 gives them a caller, `mod ops` carries `#[allow(dead_code)]`.
 
-- [ ] Write tests: round trip for each type; text length = `text_size`; blob is 8 bytes little-endian plus filler; garbage does not decode.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify.
-- [ ] Commit `feat: encode write ids into cells [SCYLLADB-4519]`.
+- [x] Write tests: round trip for each type; text length = `text_size`; blob is 8 bytes little-endian plus filler; garbage does not decode.
+- [x] Run them and confirm the failure.
+- [x] Write the code.
+- [x] Run verify.
+- [x] Commit `feat: encode write ids into cells [SCYLLADB-4519]`.
 
 ## Task 10 — outcome classes (T4)
 
@@ -253,6 +255,7 @@ must find the row absent.
 - [ ] Write tests: `should_stop` for each `stop_reason`; the burst budget gives 16 starts per tick.
 - [ ] Run them and confirm the failure.
 - [ ] Write the code; `--mode verify` runs slots until `--duration`.
+- [ ] Remove the temporary `#[allow(dead_code)]` on the modules in `main.rs`.
 - [ ] Run verify; a 10 s compose run exits 0.
 - [ ] Commit `feat: run checked slots in bursts [SCYLLADB-4519]`.
 

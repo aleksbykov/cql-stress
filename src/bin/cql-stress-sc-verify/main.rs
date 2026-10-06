@@ -2,6 +2,9 @@
 //! Design: tasks/SCYLLADB-4519/spec.md.
 
 mod cli;
+// The encoders and outcome classes get their caller with the slot loop (plan task 13), which
+// removes this allow.
+#[allow(dead_code)]
 mod ops;
 mod profile;
 mod startup;

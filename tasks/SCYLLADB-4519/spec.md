@@ -140,7 +140,8 @@ CREATE TABLE sc_verify.reg (pk bigint, gen bigint, ck int, c0 bigint, c1 text, c
 ```
 
 Keys: checked `gen = start_unix_ms × 2^20 + n` (≥ 2^60); bulk `gen = f(pk) < 2^40`.
-Cell encodings (§7.2): `bigint`/`int` = wid; `text` = `"<wid>:"` + filler to
+Write ids count from 1 within a row and stay below 2^63. Cell encodings (§7.2):
+`bigint`/`int` = wid (`int` below 2^31); `text` = `"<wid>:"` + filler to
 `text_size`; `blob` = wid as 8 bytes little-endian + filler to `blob_size`.
 
 History, check file `sealed/<seq>.jsonl` (§14.1, format v2, owned by porcupine_validator):
