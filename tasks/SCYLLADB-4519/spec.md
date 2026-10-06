@@ -209,13 +209,103 @@ pub fn parse_population(s: &str) -> Result<Box<dyn DistributionFactory>>;
 | Bulk in `both` stretches the checked operation times | Separate driver sessions; the calibration run (§22) compares write p99 with `verify` alone. |
 | An overloaded loader stretches operation times | `sched_delay_p99_ms` in every `stats` line. |
 
-## Deferred work
+## Milestone 2 — the checker, canaries and the read-back
 
-Milestone 2 (§11, §12), on branch `feat/sc-verify-m2`: the checker queue and
-child workers, canaries, `expected.jsonl` and the end-of-run read-back,
-bundling `porcupine_checker` into the image. M1 already writes the check
-files and the `archive/` layout these need, and the CLI leaves room for
-`--checker on`. The later phases (§17) need `ck`, which stays 0 in M1.
+Branch `feat/sc-verify-m2` (cut from `feat/sc-verify-m1`). Design source: Confluence
+§11.3, §11.4, §12, §14.
+
+### Overview
+
+With `--checker on` (the M2 default), every closed check file goes to a bounded queue.
+`--checker-workers` workers each run `porcupine_checker` (porcupine_validator `checker-v2`)
+as a child process on one file, with a time limit and a memory limit. The child's per-row
+lines become the rows' verdicts; a row without a line is `unknown`. Every `--canary-every`
+files, a one-row copy of a history with its first read corrupted goes through the same
+queue, and must come back `illegal`. At seal every row also records the set of values each
+cell may still hold (`expected.jsonl`). At the end of the run the queue drains, then every
+retired row is read back once and judged: `ok`, `lost` or `phantom`.
+
+```mermaid
+flowchart LR
+  R[Recorder: check file closed] --> Q{queue full?}
+  Q -- yes --> SK[archive; rows skipped; SCV skipped]
+  Q -- no --> W[worker: porcupine_checker child]
+  W -->|per-row lines| V[verdicts → rows.jsonl]
+  W -->|all ok| DEL[delete the check file]
+  W -->|otherwise| AR[archive/seq/: file, result.json, visualizations; SCV checked]
+  R -->|every canary-every files| C[canary-n.jsonl] --> Q
+  C -->|not illegal| VB[verifier-broken: exit 1]
+```
+
+### Constraints
+
+- The checker never slows the load: the queue is bounded (a full queue means `skipped`,
+  never waiting); children run at `nice 10`; a hung child is killed after
+  `--checker-timeout`.
+- Memory: `GOMEMLIMIT` plus `RLIMIT_DATA` for the child, never `RLIMIT_AS` (the Go runtime
+  reserves address space up front).
+- A row's `rows.jsonl` line is written once its verdict is final: at seal with
+  `--checker off` (as in M1), after its file is checked with `--checker on`.
+- Severity when several apply: `violation` > `lost`/`phantom` > `illegal` > `unknown` >
+  `skipped` > `unchecked` > `ok`. Read-back results go to `readback.jsonl` and
+  `report.json`, not to `rows.jsonl` (§4.3).
+
+### Failure behaviour
+
+| Condition | Behaviour |
+|---|---|
+| `--checker on` but `--checker-bin` cannot run | exit 2 at start-up |
+| Queue full | the file goes to `archive/<seq>/`; its rows are `skipped`; `SCV skipped` |
+| Child killed (timeout or memory) | rows with a line keep it; the rest are `unknown` |
+| A canary answered `ok` or `unknown` | `verifier-broken`: `SCV canary`, exit 1 |
+| End of run | the queue drains until `--checker-deadline`; files left are `skipped` |
+| Read-back of a row fails after retries | counted as `incomplete`; the exit code does not change |
+| A cell outside its expected set | `lost` (null, or a wid this row issued) or `phantom` (never issued, burned, undecodable): exit 1 |
+
+### Contracts
+
+Command additions (§15.2):
+
+```text
+  --checker on|off  --checker-bin /usr/local/bin/porcupine_checker
+  --checker-workers 2  --checker-timeout 600s  --checker-mem 4G  --checker-deadline 10m
+  --queue-max 256  --canary-every 100  --key-timeout 10s  --max-viz 3
+  --readback on|off  --readback-sample 1.0  --readback-concurrency 64
+```
+
+Child process: `porcupine_checker --output-dir <history>/archive/<seq> --key-timeout <t>
+--max-viz <n> < sealed/<seq>.jsonl`, environment `GOMEMLIMIT=<checker-mem>`.
+
+`expected.jsonl`, one line per row at seal (§12.1); `cells[i]` is the set of values cell i may
+still hold (`null` = empty):
+
+```json
+{"pk":7,"gen":"1882...","ck":0,"cells":[[3,9],[null,4]],"max_wid":12,"burned":[5]}
+```
+
+`readback.jsonl`, one line per failing cell:
+
+```json
+{"pk":7,"gen":"1882...","ck":0,"cell":"c1","expected":[null,4],"observed":11,"result":"phantom"}
+```
+
+New `SCV` lines (§14.4):
+
+```text
+SCV {"t":"checked","file":"12","ok":49,"illegal":1,"unknown":0,"archive":"archive/12"}
+SCV {"t":"skipped","file":"40","rows":50}
+SCV {"t":"canary","result":"illegal"}
+SCV {"t":"readback","rows":70112,"ok":70112,"lost":0,"phantom":0,"incomplete":0,"indet_total":913,"indet_landed":402}
+```
+
+`stats` lines gain `"queue":<files waiting>`. `report.json` gains the checker, canary and
+read-back totals.
+
+### Deferred work
+
+The later phases (§17) need `ck`, which stays 0. `indet_landed` is a run total; splitting
+it by quiet and disrupted rows is SCT's job from `expected.jsonl` and `readback.jsonl` and is
+left to T25.
 
 ## Decisions
 
@@ -232,5 +322,6 @@ files and the `archive/` layout these need, and the CLI leaves room for
 - The `SCV violation` line is printed when the row seals, once its check file is in `archive/<seq>/`, so SCT can copy the evidence before it raises the event; `wall_ms` says when the read exposed the violation, so SCT still places it next to the nemesis that caused it. A human-readable line is printed at detection. The event is up to one row's life (about 13 s) late; SCT handles it by severity (user, Checkpoint B). (review)
 - `stats` lines cover one `--report-interval`; latencies are p99 of successful operations; `sched_delay_p99_ms` is how late the slots' burst ticks ran. (build)
 - In `rows.jsonl`, `errors` counts failed reads, `fail` writes and workload errors; indeterminate writes are counted only in `writes_indet`. (review)
+- **M2:** `--checker on` is the default. The canary corrupts the first read's first cell to the row's highest issued wid + 1, which no write produced, so the check fails at that read and costs almost nothing. (spec)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)

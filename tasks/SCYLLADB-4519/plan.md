@@ -393,3 +393,138 @@ start-up session; `--mode both` (task 18) gives bulk its own.
 - [ ] Ask the user, then `buildx` for amd64 and arm64 and push `aleksbykov/cql-stress:sc-verify-m1-<short-sha>`; `docker manifest inspect` shows both.
 
 **Checkpoint C** (human review): the PR is ready to open, linking the spec.
+
+# Milestone 2 (branch `feat/sc-verify-m2`)
+
+The same rules apply. Tasks 20–27 map to T21–T24 of the tracking list. New code goes in
+`checker.rs` and `readback.rs` under `src/bin/cql-stress-sc-verify/`. Child-process tests
+use small fake checker scripts written into a temp dir; they need no Scylla.
+
+## Task 20 — M2 command line and the checker start-up check (T21)
+
+**Files:** Modify: `cli.rs`, `main.rs`
+
+**Internals:** `Checker { On, Off }` with `On` the default; `--checker-bin`,
+`--checker-workers`, `--checker-timeout`, `--checker-mem` (`4G`, `512M`), `--checker-deadline`,
+`--queue-max`, `--canary-every`, `--key-timeout`, `--max-viz`, `--readback on|off`,
+`--readback-sample`, `--readback-concurrency`; zero values rejected as in M1. With
+`--checker on`, start-up runs `<checker-bin>` on an empty v2 history and needs exit 2
+("no input") rather than a spawn error; otherwise exit 2.
+
+- [ ] Write tests: the M2 defaults; `--checker-mem 4G` parses as bytes; bad sizes and zeros fail.
+- [ ] Run them and confirm the failure.
+- [ ] Write the code.
+- [ ] Run verify (the pytests pass `--checker off` until task 22).
+- [ ] Commit `feat: add the sc-verify milestone 2 options [SCYLLADB-4519]`.
+
+## Task 21 — run one check file in a child process (T21)
+
+**Files:** Create: `src/bin/cql-stress-sc-verify/checker.rs`; Modify: `Cargo.toml` (optional `libc` in the feature)
+
+**Internals:** `async fn check_file(cfg, file, archive_dir) -> FileVerdicts`: spawns the
+checker with stdin from the file, `GOMEMLIMIT`, and a `pre_exec` that sets `nice 10` and
+`RLIMIT_DATA`; reads stdout line by line into `key → ok|illegal|unknown`; kills it after
+`--checker-timeout`; a key without a line is `unknown`. `FileVerdicts { per_key, killed }`.
+
+- [ ] Write tests with fake checkers (shell scripts): all ok; one illegal; a checker that
+      prints one line and then hangs (killed at the timeout, the rest `unknown`); one that
+      crashes; and one that checks its own `nice` value and `GOMEMLIMIT`.
+- [ ] Run them and confirm the failure.
+- [ ] Write the code.
+- [ ] Run verify.
+- [ ] Commit `feat: check a history file in a limited child process [SCYLLADB-4519]`.
+
+## Task 22 — the checker queue (T21)
+
+**Files:** Modify: `history.rs` (the recorder hands closed files over and writes rows'
+lines once their verdict is final), `checker.rs`, `main.rs`, `report.rs`; Modify:
+`tools/test_cs_sc_verify.py`, `tools/cql-stress-cassandra-stress-ci.py`
+
+**Internals:** a bounded queue (`--queue-max`) of closed files with their pending rows;
+`--checker-workers` worker tasks; per file: verdicts → the rows' `rows.jsonl` lines
+(severity order), all ok → delete the sealed file, otherwise copy it into `archive/<seq>/`
+(the child writes `result.json` and visualizations there); `SCV checked`, `SCV skipped`; a
+full queue → archive, `skipped`; at the end the queue drains until `--checker-deadline`, and
+what is left is `skipped`. `stats` gains `queue`; `report.json` gains checker totals.
+
+- [ ] Write the pytest first: `--checker on` with the checker built from porcupine_validator
+      `feat/checker-v2`: 30 s quiet → every row `ok`, `SCV checked` lines, no `sealed/`
+      files left; with a hanging fake checker → rows `unknown` and checked ops/s within 5%
+      of a `--checker off` run.
+- [ ] Run it and confirm the failure.
+- [ ] Write the code.
+- [ ] Run verify and the pytests.
+- [ ] Commit `feat: check sealed rows with porcupine_checker [SCYLLADB-4519]`.
+
+## Task 23 — canaries (T22)
+
+**Files:** Modify: `checker.rs`, `history.rs`, `main.rs`, `report.rs`; Modify: the pytest files
+
+**Internals:** every `--canary-every` closed files, the first row of the file is copied into
+`sealed/canary-<n>.jsonl` with the first read's first cell set to the row's highest wid + 1;
+queued like any file; its result is never counted in `rows.jsonl`; not `illegal` →
+`SCV canary` with the result, `verifier-broken`, exit 1.
+
+- [ ] Write tests: the canary file differs from the row's history only in that cell; pytest
+      `--canary-every 1 --check-age 10s` for 60 s → every canary `illegal`; with a fake
+      checker that answers `ok` to everything → exit 1, `verifier-broken`.
+- [ ] Run them and confirm the failure.
+- [ ] Write the code.
+- [ ] Run verify and the pytests.
+- [ ] Commit `feat: prove the checker still rejects a corrupted history [SCYLLADB-4519]`.
+
+## Task 24 — the expected state at seal (T23)
+
+**Files:** Modify: `invariants.rs` (`RowState::expected`), `slot.rs`, `history.rs`
+
+**Internals:** `fn expected(&self, sweep: Option<&[Seen]>) -> Expected { cells: Vec<Vec<Option<u64>>>,
+max_wid, burned }` per §12.1: sweep ok → the value the sweep saw plus every indeterminate
+write to the cell; sweep incomplete → every ok write to the cell that ended at or after
+`ack_floor`, every indeterminate write, and null if no write to the cell was acknowledged.
+The recorder appends it to `expected.jsonl`.
+
+- [ ] Write tests: sweep ok with and without indeterminate writes; sweep incomplete with an
+      acknowledged write, with only indeterminate writes, and with a burned wid.
+- [ ] Run them and confirm the failure.
+- [ ] Write the code.
+- [ ] Run verify.
+- [ ] Commit `feat: record each row's expected final state [SCYLLADB-4519]`.
+
+## Task 25 — the read-back (T23)
+
+**Files:** Create: `src/bin/cql-stress-sc-verify/readback.rs`; Modify: `main.rs`, `report.rs`; Modify: the pytest files
+
+**Internals:** `fn judge(expected, observed: &[Seen]) -> Vec<CellResult>` (pure, §12.1 table);
+after the checker drains, every retired row (or `--readback-sample` of them; with `--ttl`, only
+rows younger than it) is read with QUORUM, `--readback-concurrency` at a time, with
+`--sweep-retries` retries; failing cells → `readback.jsonl`; `indet_landed` counts cells that
+hold an indeterminate write; `SCV readback`; `lost` or `phantom` → exit 1.
+
+- [ ] Write tests: the decision table (in the set → ok; null or an issued wid outside the
+      set → lost; never issued, burned or undecodable → phantom; absent row = all null);
+      pytest: a row deleted behind the tool's back → `lost`, exit 1.
+- [ ] Run them and confirm the failure.
+- [ ] Write the code.
+- [ ] Run verify and the pytests.
+- [ ] Commit `feat: read every row back at the end of the run [SCYLLADB-4519]`.
+
+## Task 26 — bundle the checker into the image (T24)
+
+**Files:** Modify: `Dockerfile`
+
+**Internals:** with `CARGO_BUILD_FEATURES=strong-consistency`, the image gets
+`/usr/local/bin/porcupine_checker` from `CHECKER_IMAGE` (an `ARG`; the pinned
+porcupine_validator `v2-<sha>` image), for both architectures; the ordinary image does not.
+
+- [ ] Build both images locally; `docker run <sc image> -c "porcupine_checker < /dev/null"`
+      exits 2 ("no input"); a 30 s `--mode both` run inside the image checks rows.
+- [ ] Commit `build: bundle porcupine_checker into the strong consistency image [SCYLLADB-4519]`.
+
+## Task 27 — the milestone 2 integration list (T24)
+
+- [ ] On compose, the §20.5 list: 60 s with `--canary-every 1 --check-age 10s` → all rows
+      `ok`, read-back all `ok`, canaries `illegal`; a hanging checker → `unknown` and
+      unchanged throughput; a tiny `--checker-mem` → `unknown`; a deleted row → `lost`;
+      plus the M1 tests unchanged.
+
+**Checkpoint F** (human review): the §20.5 integration list is green; the CS M2 PR is ready.
