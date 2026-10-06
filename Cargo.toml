@@ -102,7 +102,7 @@ timerfd = ["dep:tokio-timerfd"]
 # which `.cargo/config.toml` supplies. A cargo feature cannot set RUSTFLAGS, so anything that
 # overrides RUSTFLAGS has to repeat that cfg; forgetting it is a compile error, never a
 # silently unverified run.
-strong-consistency = ["scylla/unstable-strong-consistency", "dep:clap"]
+strong-consistency = ["scylla/unstable-strong-consistency", "dep:clap", "dep:serde", "dep:serde_yaml"]
 
 [dev-dependencies]
 ntest = "0.9"

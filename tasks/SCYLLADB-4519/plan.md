@@ -129,14 +129,17 @@ builds the TLS context and prints the settings; usage errors exit 2. `parse_dura
 **Files:** Create: `src/bin/cql-stress-sc-verify/profile.rs`
 
 **Internals:** `struct Profile` (serde), `enum CellType { Int, Bigint, Text, Blob }`;
-`Profile::load(path)`, `validate()` (1..8 cells, sizes ≥ 9 for `text`/`blob`
-so a wid fits), `keyspace_ddl()`, `table_ddl(table)`.
+`Profile::load(path)`, `validate()` (1..8 cells; `text_size` ≥ 21 and `blob_size` ≥ 8
+so any u64 wid fits; keyspace and table names must be lower-case identifiers because
+they go into DDL verbatim; unknown keys rejected), `keyspace_ddl()`, `table_ddl(table)`,
+`bulk_table_name()`. `Cargo.toml`: the feature adds `dep:serde`, `dep:serde_yaml`.
+`main` loads the profile (failure → exit 2) and prints the DDL.
 
-- [ ] Write tests: the default profile gives the spec's DDL text exactly; 0 or 9 cells fail; an unknown type fails.
-- [ ] Run them and confirm the failure.
-- [ ] Write `profile.rs`.
-- [ ] Run verify.
-- [ ] Commit `feat: load the sc-verify profile and build its DDL [SCYLLADB-4519]`.
+- [x] Write tests: the default profile gives the spec's DDL text exactly; 0 or 9 cells fail; an unknown type fails.
+- [x] Run them and confirm the failure.
+- [x] Write `profile.rs`.
+- [x] Run verify.
+- [x] Commit `feat: load the sc-verify profile and build its DDL [SCYLLADB-4519]`.
 
 ## Task 7 — schema create, diff and start-up checks (T3)
 
