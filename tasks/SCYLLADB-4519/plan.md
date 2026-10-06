@@ -234,18 +234,22 @@ contract for task 13.
 
 ## Task 12 — keys and history file (T6)
 
-**Files:** Create: `src/bin/cql-stress-sc-verify/history.rs`, `.../keys.rs`; Create: `tests/data/sc_verify/history_v2.jsonl`
+**Files:** Create: `src/bin/cql-stress-sc-verify/history.rs`, `.../keys.rs`, `.../history_test.jsonl` (the golden file sits next to the code, like the repo's other fixtures); Modify: `Cargo.toml` (optional `serde_json` in the feature; it was a build dependency only)
 
-**Internals:** `struct GenMinter` (`start_ms × 2^20 + n`, re-base at 2^20 and
-when the clock is behind); `struct PkPool` (wraps around the population);
-`struct CheckFile` writes the `# key …` line, then call and return lines;
-`gen` is a string in JSON.
+**Internals:** `struct RowKey { pk, gen, ck }`; `struct GenMinter` (`start_ms × 2^20 + n`;
+`next(now_ms) -> Option<i64>` returns `None` when a millisecond's 2^20 are used up and
+the clock has not moved on; `new` refuses a clock before 2004, where gens could approach the
+bulk range). No pk pool type: the `seq` population already wraps around and is thread-safe.
+`enum OpRecord { Write { client, wid, mask, start_ns, status }, Read { client, start_ns,
+end_ns, seen } }`; `struct CheckFile` with `create`, `append_row(key, cells, ops) -> key`,
+`rows`, `finish`. It writes the `# key …` line, then call and return lines, with no return
+for an indeterminate write; `gen` is a string; an undecodable cell is `-1`.
 
-- [ ] Write tests: gen ≥ 2^60 and strictly increasing across a re-base; pk wraps; one known row written equals the golden file byte for byte.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify.
-- [ ] Commit `feat: mint row keys and write v2 history files [SCYLLADB-4519]`.
+- [x] Write tests: gen ≥ 2^60 and strictly increasing across a re-base; pk wraps; one known row written equals the golden file byte for byte.
+- [x] Run them and confirm the failure. (They failed to compile; after the code, five guarded breaks, covering an indeterminate write's return line, undecodable as null, `gen` unquoted, a non-strict re-base and no 2004 guard, each failed a test.)
+- [x] Write the code.
+- [x] Run verify.
+- [x] Commit `feat: mint row keys and write v2 history files [SCYLLADB-4519]`.
 
 ## Task 13 — the slot loop (T6)
 

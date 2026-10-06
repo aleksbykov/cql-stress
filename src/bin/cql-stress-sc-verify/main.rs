@@ -5,7 +5,11 @@ mod cli;
 // These modules get their caller with the slot loop (plan task 13), which removes the
 // allows.
 #[allow(dead_code)]
+mod history;
+#[allow(dead_code)]
 mod invariants;
+#[allow(dead_code)]
+mod keys;
 #[allow(dead_code)]
 mod ops;
 mod profile;

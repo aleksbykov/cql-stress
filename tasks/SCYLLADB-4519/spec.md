@@ -226,5 +226,6 @@ files and the `archive/` layout these need, and the CLI leaves room for
 - `clap` is added for the new binary's CLI (user, 2026-09-25). (spec)
 - The binary has `required-features = ["strong-consistency"]`, and that feature also turns on `serde`, `serde_yaml` and `clap`. A default build stays as it is. (spec)
 - TLS is in M1: `--ssl` with PEM files through `openssl`. The server certificate is verified only when `--ssl-ca` is given, as in cassandra-stress (user, 2026-10-06). (spec)
+- A read cell that does not decode is written to the history as wid `-1`, which is never issued, so the checker cannot explain that read either; `null` would hide it. (build)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)
