@@ -217,17 +217,20 @@ read failure is not recorded.
 
 **Files:** Create: `src/bin/cql-stress-sc-verify/invariants.rs`
 
-**Internals:** `struct RowState` (per wid: cells set, start, end or `None`, status;
-per cell: `ack_floor`, `ack_seen`, `obs_floor`, `obs_seen`);
-`fn snapshot(&self) -> Floors`, taken before the read's start time;
-`fn on_write_end(..)`; `fn check_read(&Floors, start, cells) -> Vec<Violation>`;
-`fn on_read_end(..)`, which skips INV-0 values. `Violation { kind, cell }`.
+**Internals:** `struct RowState` (per wid: cell mask, start, `WriteStatus { InFlight,
+Ok(end), Indeterminate, Fail(end) }`; per cell: `ack` and `obs` floors as `Option<u64>`,
+where `Some` means seen); `begin_write(mask, start) -> wid` (wids from 1; an empty mask
+panics); `end_write(wid, WriteEnd)`; `snapshot() -> Floors`, taken before the read's start
+time; `check_read(&Floors, seen) -> Vec<Violation>` (no start-time parameter: the floors carry
+the timing); `end_read(seen)`, which skips INV-0 values; `status(wid)`. `Seen { Null,
+Wid, Undecodable }`, `Violation { kind: Inv, cell }`. The module doc states the locking
+contract for task 13.
 
-- [ ] Write tests: for each of INV-0..3, one timeline that fires and one legal one; an indeterminate write is never older; an op ending between `snapshot` and the read's start does not count; the F12 shape with non-overlapping writes fires INV-3.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify.
-- [ ] Commit `feat: check reads with streaming invariants [SCYLLADB-4519]`.
+- [x] Write tests: for each of INV-0..3, one timeline that fires and one legal one; an indeterminate write is never older; an op ending between `snapshot` and the read's start does not count; the F12 shape with non-overlapping writes fires INV-3. Added from the advisor's review: a wid issued after the snapshot; F12 with overlapping writes fires nothing (the known gap); INV-3 against an in-flight or indeterminate `u`; INV-0 values do not move the floors; equal times are not "before"; an empty write panics; write status.
+- [x] Run them and confirm the failure. (They failed to compile; after the code, ten guarded breaks, one per rule, each failed a test.)
+- [x] Write the code.
+- [x] Run verify.
+- [x] Commit `feat: check reads with streaming invariants [SCYLLADB-4519]`.
 
 ## Task 12 — keys and history file (T6)
 
