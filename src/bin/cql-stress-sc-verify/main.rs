@@ -12,6 +12,7 @@ mod invariants;
 mod keys;
 mod ops;
 mod profile;
+mod readback;
 mod report;
 mod slot;
 mod startup;
@@ -32,10 +33,11 @@ use tracing_subscriber::EnvFilter;
 
 use bulk::{BulkFactory, BulkStats};
 use checker::{CheckQueue, CheckerConfig, FileVerdicts, Job, RowResult};
-use cli::{Checker, Cli, Mode};
+use cli::{Checker, Cli, Mode, Readback};
 use history::{ClosedFile, Recorder};
 use keys::GenMinter;
 use profile::Profile;
+use readback::Retired;
 use report::{IntervalStats, Report, Scv};
 use slot::{Checked, SealedRow};
 
@@ -218,6 +220,7 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
 
     let history_dir = checked.cli.history_dir.clone();
     let mut totals = Report::default();
+    let mut retired: Vec<Retired> = Vec::new();
     let mut reports = tokio::time::interval(checked.cli.report_interval);
     reports.tick().await; // the first tick is immediate
     let mut last_report = Instant::now();
@@ -225,6 +228,13 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
         tokio::select! {
             row = sealed.recv() => {
                 let Some(row) = row else { break };
+                if checked.cli.readback == Readback::On {
+                    retired.push(Retired {
+                        key: row.key,
+                        expected: row.expected.clone(),
+                        sealed_ms: row.wall_end_ms,
+                    });
+                }
                 if let (Some(closed), Some(checking)) =
                     (record(&checked, &mut recorder, &mut totals, row), checking.as_mut())
                 {
@@ -276,6 +286,41 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
     }
     if let Some(checking) = checking.as_mut() {
         checking.drain(&checked, &mut recorder, &mut totals).await;
+    }
+    // After the checker: every retired row read back once (spec §12.2).
+    if checked.cli.readback == Readback::On {
+        match readback::read_back(&checked, retired, &history_dir).await {
+            Ok(summary) => {
+                report::print(&Scv::Readback {
+                    rows: summary.rows,
+                    ok: summary.ok,
+                    lost: summary.lost,
+                    phantom: summary.phantom,
+                    incomplete: summary.incomplete,
+                    indet_total: summary.indet_total,
+                    indet_landed: summary.indet_landed,
+                });
+                if summary.expired > 0 {
+                    println!(
+                        "Read-back: {} rows older than --ttl were not read",
+                        summary.expired
+                    );
+                }
+                totals.readback = Some(summary.into());
+                if summary.lost + summary.phantom > 0 {
+                    eprintln!(
+                        "error: the read-back found {} rows lost and {} with phantom values; \
+                         see readback.jsonl",
+                        summary.lost, summary.phantom
+                    );
+                    checked.exit.raise(1);
+                }
+            }
+            Err(err) => {
+                eprintln!("error: the read-back failed: {err:#}");
+                checked.exit.raise(3);
+            }
+        }
     }
     if totals.violations > 0 {
         checked.exit.raise(1);

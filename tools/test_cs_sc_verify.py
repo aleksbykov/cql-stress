@@ -17,6 +17,8 @@ from pathlib import Path
 from test_cs_strong_consistency import UNAVAILABLE_CODE, keyspace_consistency
 
 BINARY = "cql-stress-sc-verify"
+# The strongly consistent node of docker/scylla-test/compose.yml.
+SC_CONTAINER = os.getenv("SCYLLA_SC_CONTAINER", "scylla_sc_test")
 
 
 def write_profile(path, keyspace: str, cells="[bigint, text, blob]") -> str:
@@ -112,6 +114,10 @@ def run_verify_quiet(node, session, keyspace: str, tmp_path):
     assert full, "no row reached --ops-per-gen in 60 s"
     short = [row for row in full if row["ops"] < 150]
     assert not short, f"rows with fewer than 150 recorded operations: {short}"
+
+    # The read-back finds every row as it was left.
+    readback = scv_lines(result.stdout, "readback")
+    assert readback and readback[0]["ok"] == readback[0]["rows"] == len(rows), readback
 
     # Every row can be found in its check file by its key.
     for row in rows:
@@ -325,3 +331,33 @@ def run_broken_checker(node, session, keyspace: str, tmp_path):
     assert canaries and all(c["result"] == "ok" for c in canaries), canaries
     assert "verifier-broken" in result.stderr
     assert list((history / "archive").glob("canary-*/canary-*.jsonl")), "the canary is kept"
+
+
+def run_deleted_row(node, session, keyspace: str, tmp_path):
+    """A row deleted behind the tool's back is found lost by the read-back: exit 1."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
+           "--mode", "verify", "--duration", "20s", "--history-dir", str(history),
+           "--checker", "off", "--ops-per-gen", "20"]
+    print(" ".join(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    rows_file = history / "rows.jsonl"
+    deadline = time.time() + 60
+    while time.time() < deadline and not (rows_file.exists() and rows_file.read_text().strip()):
+        time.sleep(0.2)
+    row = json.loads(rows_file.read_text().splitlines()[0])
+    # Through cqlsh in the node's container: with the tablets-routing-v2 extension
+    # negotiated, the server rejects writes from the Python driver ("requires that every
+    # EXECUTE request carry a tablet_version_block"). SC tables take QUORUM writes only.
+    delete = (f"CONSISTENCY QUORUM; DELETE FROM {keyspace}.reg WHERE pk = {int(row['pk'])} "
+              f"AND gen = {int(row['gen'])} AND ck = 0;")
+    subprocess.run(["docker", "exec", SC_CONTAINER, "cqlsh", "-e", delete], check=True)
+    out, err = proc.communicate(timeout=600)
+    print(out[-3000:], err[-3000:], sep="\n")
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}"
+    readback = scv_lines(out, "readback")
+    assert readback and readback[0]["lost"] >= 1, readback
+    lines = [json.loads(line) for line in (history / "readback.jsonl").read_text().splitlines()]
+    assert any(line["pk"] == row["pk"] and line["gen"] == row["gen"] and line["result"] == "lost"
+               for line in lines), lines

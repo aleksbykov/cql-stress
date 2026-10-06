@@ -95,12 +95,14 @@ pub struct Floors {
 }
 
 /// A retired row's expected final state (spec §12.1): per cell, the values it may hold
-/// (`None` = null); the highest wid issued; the burned wids.
+/// (`None` = null); the highest wid issued; the burned wids; the indeterminate wids, whose
+/// landing the read-back counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expected {
     pub cells: Vec<Vec<Option<u64>>>,
     pub max_wid: u64,
     pub burned: Vec<u64>,
+    pub indeterminate: Vec<u64>,
 }
 
 /// What the tool remembers about one live row (spec §10.1).
@@ -265,6 +267,11 @@ impl RowState {
             burned: self
                 .wids()
                 .filter(|(_, w)| matches!(w.status, WriteStatus::Fail(_)))
+                .map(|(wid, _)| wid)
+                .collect(),
+            indeterminate: self
+                .wids()
+                .filter(|(_, w)| w.status == WriteStatus::Indeterminate)
                 .map(|(wid, _)| wid)
                 .collect(),
         }
@@ -508,6 +515,7 @@ mod tests {
         let expected = row.expected(Some(&[Wid(w2), Null]));
         assert_eq!(expected.cells, [vec![Some(w2), Some(late)], vec![None]]);
         assert_eq!((expected.max_wid, expected.burned.len()), (3, 0));
+        assert_eq!(expected.indeterminate, [late]);
     }
 
     /// Spec §12.1, sweep incomplete: every ok write that ended at or after the cell's ack floor
@@ -530,6 +538,7 @@ mod tests {
         );
         assert_eq!(expected.max_wid, 5);
         assert_eq!(expected.burned, [burned]);
+        assert_eq!(expected.indeterminate, [lost]);
     }
 
     #[test]

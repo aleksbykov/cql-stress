@@ -58,6 +58,16 @@ pub enum Scv<'a> {
         file: String,
         rows: usize,
     },
+    /// The end-of-run read-back (spec §12).
+    Readback {
+        rows: u64,
+        ok: u64,
+        lost: u64,
+        phantom: u64,
+        incomplete: u64,
+        indet_total: u64,
+        indet_landed: u64,
+    },
     /// A canary's result; anything but `illegal` is `verifier-broken`.
     Canary {
         result: &'a str,
@@ -219,6 +229,33 @@ impl Stats {
     }
 }
 
+#[derive(Serialize, Default, Debug, Clone, Copy)]
+pub struct ReadbackTotals {
+    pub rows: u64,
+    pub ok: u64,
+    pub lost: u64,
+    pub phantom: u64,
+    pub incomplete: u64,
+    pub expired: u64,
+    pub indet_total: u64,
+    pub indet_landed: u64,
+}
+
+impl From<crate::readback::Summary> for ReadbackTotals {
+    fn from(s: crate::readback::Summary) -> Self {
+        Self {
+            rows: s.rows,
+            ok: s.ok,
+            lost: s.lost,
+            phantom: s.phantom,
+            incomplete: s.incomplete,
+            expired: s.expired,
+            indet_total: s.indet_total,
+            indet_landed: s.indet_landed,
+        }
+    }
+}
+
 /// `report.json`: the run's totals, rewritten every `--report-interval` and at exit.
 #[derive(Serialize, Default, Debug, Clone)]
 pub struct Report {
@@ -239,6 +276,8 @@ pub struct Report {
     pub canaries_ok: u64,
     pub canaries_failed: u64,
     pub canaries_skipped: u64,
+    /// The read-back's totals, once it ran.
+    pub readback: Option<ReadbackTotals>,
     pub read_p99_ms: f64,
     pub write_p99_ms: f64,
     pub sched_delay_p99_ms: f64,

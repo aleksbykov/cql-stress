@@ -524,13 +524,13 @@ rows younger than it) is read with QUORUM, `--readback-concurrency` at a time, w
 `--sweep-retries` retries; failing cells → `readback.jsonl`; `indet_landed` counts cells that
 hold an indeterminate write; `SCV readback`; `lost` or `phantom` → exit 1.
 
-- [ ] Write tests: the decision table (in the set → ok; null or an issued wid outside the
+- [x] Write tests: the decision table (in the set → ok; null or an issued wid outside the
       set → lost; never issued, burned or undecodable → phantom; absent row = all null);
       pytest: a row deleted behind the tool's back → `lost`, exit 1.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify and the pytests.
-- [ ] Commit `feat: read every row back at the end of the run [SCYLLADB-4519]`.
+- [x] Run them and confirm the failure. (The unit tests failed to compile; the deleted-row pytest failed with exit 0 and no `SCV readback`. A `>`/`>=` slip at the highest wid fails `judge_test`. `Expected` gains `indeterminate`. The pytest deletes through `cqlsh` in the container: with tablets-routing-v2 negotiated, the Python driver's writes are rejected.)
+- [x] Write the code.
+- [x] Run verify and the pytests. (Quiet 60 s: 160 rows read back `ok`; deleted row: 1 `lost`, its cells null against their expected wids, exit 1.)
+- [x] Commit `feat: read every row back at the end of the run [SCYLLADB-4519]`.
 
 ## Task 26 — bundle the checker into the image (T24)
 

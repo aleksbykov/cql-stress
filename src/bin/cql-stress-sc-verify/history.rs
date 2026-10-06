@@ -268,6 +268,7 @@ struct ExpectedLine<'a> {
     cells: &'a [Vec<Option<u64>>],
     max_wid: u64,
     burned: &'a [u64],
+    indeterminate: &'a [u64],
 }
 
 /// A row of a closed check file whose verdict waits for the checker.
@@ -426,6 +427,7 @@ impl Recorder {
             cells: &row.expected.cells,
             max_wid: row.expected.max_wid,
             burned: &row.expected.burned,
+            indeterminate: &row.expected.indeterminate,
         };
         let out = &mut self.expected;
         let result = (|| -> Result<()> {
@@ -552,6 +554,7 @@ mod tests {
                 cells: vec![vec![None, Some(3)]],
                 max_wid: 4,
                 burned: vec![2],
+                indeterminate: vec![3],
             },
             violations: vec![
                 Detected {
@@ -622,7 +625,7 @@ mod tests {
         assert_eq!(
             expected[2],
             format!(
-                "{{\"pk\":2,\"gen\":\"{}\",\"ck\":0,\"cells\":[[null,3]],\"max_wid\":4,\"burned\":[2]}}",
+                "{{\"pk\":2,\"gen\":\"{}\",\"ck\":0,\"cells\":[[null,3]],\"max_wid\":4,\"burned\":[2],\"indeterminate\":[3]}}",
                 (1i64 << 60) + 2
             )
         );

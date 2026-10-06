@@ -280,10 +280,12 @@ Child process: `porcupine_checker --output-dir <history>/archive/<seq> --key-tim
 still hold (`null` = empty):
 
 ```json
-{"pk":7,"gen":"1882...","ck":0,"cells":[[3,9],[null,4]],"max_wid":12,"burned":[5]}
+{"pk":7,"gen":"1882...","ck":0,"cells":[[3,9],[null,4]],"max_wid":12,"burned":[5],"indeterminate":[9]}
 ```
 
-`readback.jsonl`, one line per failing cell:
+`indeterminate` lists the row's timed-out writes, so the read-back can count those that
+landed. `readback.jsonl`, one line per failing cell, and one per row that could not be read
+(`"result":"incomplete"`):
 
 ```json
 {"pk":7,"gen":"1882...","ck":0,"cell":"c1","expected":[null,4],"observed":11,"result":"phantom"}
