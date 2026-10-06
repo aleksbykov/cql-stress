@@ -19,7 +19,8 @@ use crate::slot::{unix_ms, Checked};
 pub struct Retired {
     pub key: RowKey,
     pub expected: Expected,
-    pub sealed_ms: u64,
+    /// When the row started, in unix ms: its first write can be this old.
+    pub start_ms: u64,
 }
 
 /// The read-back's totals (spec §14.4 `SCV readback`); `ok`, `lost`, `phantom` and
@@ -61,27 +62,35 @@ pub async fn read_back(checked: &Checked, rows: Vec<Retired>, dir: &Path) -> Res
     );
     let mut summary = Summary::default();
     let ttl_ms = u64::from(checked.cli.ttl) * 1000;
-    let now = unix_ms();
     let sample = checked.cli.readback_sample;
     let rows: Vec<Retired> = rows
         .into_iter()
         .filter(|_| sample >= 1.0 || random_bool(sample))
-        .filter(|row| {
-            let expired = ttl_ms > 0 && now.saturating_sub(row.sealed_ms) >= ttl_ms;
-            summary.expired += u64::from(expired);
-            !expired
-        })
         .collect();
 
+    // Expiry is judged per row just before it is read: the read-back itself takes time.
     let mut reads = futures::stream::iter(rows)
         .map(|row| async move {
-            let seen = read_row(checked, &row.key).await;
-            (row, seen)
+            if may_have_expired(row.start_ms, unix_ms(), ttl_ms) {
+                return (row, Read::Expired);
+            }
+            let read = match read_row(checked, &row.key).await {
+                Some(seen) => Read::Seen(seen),
+                None => Read::Unreadable,
+            };
+            (row, read)
         })
         .buffer_unordered(checked.cli.readback_concurrency);
-    while let Some((row, seen)) = reads.next().await {
+    while let Some((row, read)) = reads.next().await {
+        let seen = match read {
+            Read::Expired => {
+                summary.expired += 1;
+                continue;
+            }
+            Read::Unreadable => None,
+            Read::Seen(seen) => Some(seen),
+        };
         summary.rows += 1;
-        summary.indet_total += row.expected.indeterminate.len() as u64;
         let line = |cell, expected, observed, result| Line {
             pk: row.key.pk,
             gen: row.key.gen.to_string(),
@@ -96,6 +105,8 @@ pub async fn read_back(checked: &Checked, rows: Vec<Retired>, dir: &Path) -> Res
             write_line(&mut out, &line(None, None, None, "incomplete"))?;
             continue;
         };
+        // Only rows actually read can show whether their indeterminate writes landed.
+        summary.indet_total += row.expected.indeterminate.len() as u64;
         summary.indet_landed += landed(&row.expected, &seen) as u64;
         let cells = judge(&row.expected, &seen);
         match row_result(&cells) {
@@ -127,6 +138,20 @@ pub async fn read_back(checked: &Checked, rows: Vec<Retired>, dir: &Path) -> Res
     }
     out.flush().context("Failed to write readback.jsonl")?;
     Ok(summary)
+}
+
+enum Read {
+    Seen(Vec<Seen>),
+    Unreadable,
+    Expired,
+}
+
+/// Whether a row's cells may have expired under `--ttl` (`ttl_ms`; 0 is no TTL). A cell may
+/// have been written as early as the row's start, and the margin, a tenth of the TTL, is at
+/// least one longest round under the TTL guard (spec §7.4) and covers clock skew between the
+/// loader and the nodes: an expired cell must never be judged lost.
+fn may_have_expired(start_ms: u64, now_ms: u64, ttl_ms: u64) -> bool {
+    ttl_ms > 0 && now_ms.saturating_sub(start_ms) + ttl_ms / 10 >= ttl_ms
 }
 
 async fn read_row(checked: &Checked, key: &RowKey) -> Option<Vec<Seen>> {
@@ -256,6 +281,17 @@ mod tests {
             Lost,
             "c1 was never written"
         );
+    }
+
+    /// A cell may have been written as early as the row's start; the margin covers a tenth
+    /// of the TTL, at least one longest round under the TTL guard, plus clock skew.
+    #[test]
+    fn ttl_expiry_counts_from_the_row_start_test() {
+        let hour = 3_600_000;
+        assert!(!may_have_expired(0, u64::MAX, 0), "no TTL, nothing expires");
+        assert!(!may_have_expired(1_000_000, 1_000_000 + 3_239_000, hour));
+        assert!(may_have_expired(1_000_000, 1_000_000 + 3_240_000, hour));
+        assert!(may_have_expired(1_000_000, 1_000_000 + 2 * hour, hour));
     }
 
     #[test]

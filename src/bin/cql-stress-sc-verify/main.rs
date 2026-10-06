@@ -232,7 +232,7 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
                     retired.push(Retired {
                         key: row.key,
                         expected: row.expected.clone(),
-                        sealed_ms: row.wall_end_ms,
+                        start_ms: row.wall_start_ms,
                     });
                 }
                 if let (Some(closed), Some(checking)) =
