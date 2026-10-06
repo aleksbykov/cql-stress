@@ -89,13 +89,13 @@ path in the binary stays unchanged. The tests in the moved files move with them.
 **Internals:** `pub fn parse_distribution(s: &str) -> Result<Box<dyn DistributionFactory>>`
 (the body of today's `impl Parsable for Box<dyn DistributionFactory>`, which now calls it);
 `pub fn parse_population(s: &str) -> Result<Box<dyn DistributionFactory>>` for
-`seq=a..b` (inclusive, i64) or `dist=<distribution>`.
+`seq=a..b` (inclusive, i64, with the k/m/b suffixes of the library's `parse_long`) or `dist=<distribution>`.
 
-- [ ] Write tests: `seq=0..1023` yields 0, 1, …, 1023, 0; `dist=uniform(1..10)` parses; `seq=5..1`, `foo=1` and `dist=bogus(1)` fail.
-- [ ] Run them and confirm the failure.
-- [ ] Add both functions; route the `Parsable` impl through `parse_distribution`.
-- [ ] Run verify; `cs_args_good_test.in` and `cs_args_bad_test.in` pass unchanged.
-- [ ] Commit `feat: parse populations in the library [SCYLLADB-4519]`.
+- [x] Write tests: `seq=0..1023` yields 0, 1, …, 1023, 0; `dist=uniform(1..10)` parses; `seq=5..1`, `foo=1` and `dist=bogus(1)` fail.
+- [x] Run them and confirm the failure.
+- [x] Add both functions; route the `Parsable` impl through `parse_distribution`.
+- [x] Run verify; `cs_args_good_test.in` and `cs_args_bad_test.in` pass unchanged.
+- [x] Commit `feat: parse populations in the library [SCYLLADB-4519]`.
 
 **Checkpoint A** (human review): Rust tests and the SC pytest are green; cassandra-stress output is unchanged.
 
