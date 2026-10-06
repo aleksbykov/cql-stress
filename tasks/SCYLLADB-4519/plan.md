@@ -102,7 +102,7 @@ path in the binary stays unchanged. The tests in the moved files move with them.
 ## Task 5 — binary skeleton and CLI (T3)
 
 **Files:**
-- Modify: `Cargo.toml` (the `[[bin]]` entry with `required-features = ["strong-consistency"]`; the feature adds `dep:serde`, `dep:serde_yaml`, `dep:clap`; `clap` with `derive`, optional)
+- Modify: `Cargo.toml` (the `[[bin]]` entry with `required-features = ["strong-consistency"]`; the feature adds `dep:clap`, optional `clap` 4 with `derive`; `serde`/`serde_yaml` join in task 6, which uses them)
 - Create: `src/bin/cql-stress-sc-verify/main.rs`, `.../cli.rs`
 
 **Internals:** `struct Cli` (clap derive) holding every flag of the spec's
@@ -112,16 +112,17 @@ flags are `--nodes`, `--user`, `--password` and TLS: `--ssl` turns it on,
 `--ssl-ca <pem>` verifies the server, and `--ssl-cert <pem>` with `--ssl-key <pem>`
 gives a client certificate. `fn tls_context(&Cli) -> Result<Option<SslContext>>`
 uses `openssl`, which is already a dependency. The spec's Command block gets these
-exact flags in this commit (user decision: TLS is in M1).
+exact flags in this commit (user decision: TLS is in M1). `main` parses the flags,
+builds the TLS context and prints the settings; usage errors exit 2. `parse_duration`
+(`ms`/`s`/`m`/`h`) is ten lines in `cli.rs`, not a new crate. One of `--duration` or
+`-n` is required.
 
-- [ ] Write a `tls_context` test: no `--ssl` → `None`; `--ssl-cert` without `--ssl-key` → error. `main` parses the flags
-and prints the settings.
-
-- [ ] Write `cli.rs` tests: the defaults; `-n` with `--mode verify` is an error; `--checker on` is an error.
-- [ ] Run them and confirm the failure.
-- [ ] Write the skeleton.
-- [ ] Run verify; also `cargo build` with no features and confirm the binary is skipped.
-- [ ] Commit `feat: add the cql-stress-sc-verify binary skeleton [SCYLLADB-4519]`.
+- [x] Write a `tls_context` test: no `--ssl` → `None`; `--ssl-cert` without `--ssl-key` → error.
+- [x] Write `cli.rs` tests: the defaults; `-n` with `--mode verify` is an error; `--checker on` is an error.
+- [x] Run them and confirm the failure. (The code came first here; two deliberate breaks, a changed default and a dropped `-n` rule, each failed a test.)
+- [x] Write the skeleton.
+- [x] Run verify; also `cargo build` with no features and confirm the binary is skipped.
+- [x] Commit `feat: add the cql-stress-sc-verify binary skeleton [SCYLLADB-4519]`.
 
 ## Task 6 — profile and DDL (T3)
 

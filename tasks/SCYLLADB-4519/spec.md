@@ -115,8 +115,10 @@ Command (§15.2; M1 subset). The M2 checker and read-back flags are deferred:
 
 ```text
 cql-stress-sc-verify --profile <file> --mode verify|bulk|both
-  --nodes --user --password --ssl ...  --consistency quorum|local_quorum
-  --duration <d> | -n <ops>
+  --nodes <host[:port],...> --user <u> --password <p>
+  --ssl [--ssl-ca <pem>] [--ssl-cert <pem> --ssl-key <pem>]
+  --consistency quorum|local-quorum
+  --duration <30s|5m|4h> | -n <ops>        one is required; -n only with --mode bulk
   --pop --slots --clients-per-row --ops-per-gen --max-gen-duration
   --burst-ops --burst-interval --read-ratio --insert-ratio --request-timeout
   --sweep-retries --sweep-backoff --max-indeterminate --unavailable-is-fail
@@ -222,5 +224,6 @@ files and the `archive/` layout these need, and the CLI leaves room for
 - One spec for all of M1, not split off for the T1/T2 library move: Confluence §6 sets one PR per repo per milestone. (review)
 - `clap` is added for the new binary's CLI (user, 2026-09-25). (spec)
 - The binary has `required-features = ["strong-consistency"]`, and that feature also turns on `serde`, `serde_yaml` and `clap`. A default build stays as it is. (spec)
+- TLS is in M1: `--ssl` with PEM files through `openssl`. The server certificate is verified only when `--ssl-ca` is given, as in cassandra-stress (user, 2026-10-06). (spec)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)
