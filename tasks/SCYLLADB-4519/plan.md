@@ -540,9 +540,9 @@ hold an indeterminate write; `SCV readback`; `lost` or `phantom` → exit 1.
 `/usr/local/bin/porcupine_checker` from `CHECKER_IMAGE` (an `ARG`; the pinned
 porcupine_validator `v2-<sha>` image), for both architectures; the ordinary image does not.
 
-- [ ] Build both images locally; `docker run <sc image> -c "porcupine_checker < /dev/null"`
-      exits 2 ("no input"); a 30 s `--mode both` run inside the image checks rows.
-- [ ] Commit `build: bundle porcupine_checker into the strong consistency image [SCYLLADB-4519]`.
+- [x] Build both images locally (the stage trick was tried on a scratch Dockerfile first: no features → no checker, `strong-consistency` or `user-profile,strong-consistency` → the checker; the real ordinary image has no checker, exit 127); `docker run <sc image> -c "porcupine_checker < /dev/null"`
+      exits 2 ("no input"); a 30 s `--mode both` run inside the image checks rows. (Defaults plus `--canary-every 1 --check-age 5s`: 3 files, 96 rows `ok`, 3 canaries `illegal`, read-back 96/96 `ok`, `sealed/` empty, exit 0. The pinned checker image is amd64 only, so an arm64 build of this image waits for an arm64 checker image.)
+- [x] Commit `build: bundle porcupine_checker into the strong consistency image [SCYLLADB-4519]`.
 
 ## Task 27 — the milestone 2 integration list (T24)
 

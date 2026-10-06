@@ -1,3 +1,9 @@
+# porcupine_checker (porcupine_validator checker-v2), pinned here once: CI's strong
+# consistency tests take the checker from this image too. `COPY --from` does not expand an
+# ARG, so the image is a stage of its own.
+ARG CHECKER_IMAGE=aleksbykov/porcupine_validator:v2-0cdfd5c
+FROM ${CHECKER_IMAGE} AS checker
+
 # Must be >= the `rust-version` in Cargo.toml (1.89.0). scylla-rust-driver 1.9.0 is
 # edition 2024 / rust-version 1.88, so an older toolchain fails outright rather than just
 # warning.
@@ -21,11 +27,8 @@ ENV CARGO_TERM_COLOR=always
 # strongly-consistent-tables API, which the ordinary image must not depend on.
 ARG CARGO_BUILD_FEATURES=""
 
-# porcupine_checker (porcupine_validator checker-v2), pinned here once: CI's strong
-# consistency tests take the checker from this image too.
-ARG CHECKER_IMAGE=aleksbykov/porcupine_validator:v2-0cdfd5c
-
 COPY . .
+COPY --from=checker /porcupine_checker /tmp/porcupine_checker
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -34,7 +37,10 @@ RUN apt-get update && apt-get install -y \
     git \
     libssl-dev \
     pkg-config \
-    && cargo build --profile dist --all ${CARGO_BUILD_FEATURES:+--features "$CARGO_BUILD_FEATURES"}
+    && cargo build --profile dist --all ${CARGO_BUILD_FEATURES:+--features "$CARGO_BUILD_FEATURES"} \
+    && case ",${CARGO_BUILD_FEATURES}," in \
+         *,strong-consistency,*) cp /tmp/porcupine_checker target/dist/porcupine_checker ;; \
+       esac
 
 FROM debian:bookworm-slim AS production
 
@@ -43,9 +49,10 @@ ENV PATH="${PATH}:/usr/local/bin"
 LABEL org.opencontainers.image.source="https://github.com/scylladb/cql-stress"
 LABEL org.opencontainers.image.title="ScyllaDB cql-stress"
 
-# `cql-stress-sc-verify` exists only in a `strong-consistency` build. A pattern that matches
-# nothing is allowed next to a source that matches, so the ordinary image simply lacks it.
-COPY --from=builder /app/target/dist/cql-stress-cassandra-stress /app/target/dist/cql-stress-sc-verif[y] /usr/local/bin/
+# `cql-stress-sc-verify` and the `porcupine_checker` it runs exist only in a
+# `strong-consistency` build. A pattern that matches nothing is allowed next to a source that
+# matches, so the ordinary image simply lacks them.
+COPY --from=builder /app/target/dist/cql-stress-cassandra-stress /app/target/dist/cql-stress-sc-verif[y] /app/target/dist/porcupine_checke[r] /usr/local/bin/
 COPY --from=builder /app/target/dist/cql-stress-scylla-bench /usr/local/bin/cql-stress-scylla-bench
 
 RUN --mount=type=cache,target=/var/cache/apt apt-get update \
