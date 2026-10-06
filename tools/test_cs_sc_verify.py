@@ -164,3 +164,26 @@ def run_bulk(node, session, keyspace: str, tmp_path):
     never = bulk(node, profile, tmp_path / "never", "--bulk-op", "read", "-n", "100",
                  "--bulk-pop", "seq=1099600000000..1099600000099")
     assert never["bulk_misses"] == 100, never
+
+
+def run_both(node, session, keyspace: str, tmp_path):
+    """Checked slots and bulk load together: every checked row stays clean."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
+           "--mode", "both", "--duration", "20s", "--bulk-threads", "8",
+           "--report-interval", "5s", "--history-dir", str(history)]
+    print(" ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    print(result.stdout, result.stderr, sep="\n")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+    assert '"mode":"both"' in result.stdout and '"bulk_pop":' in result.stdout
+
+    stats = [json.loads(line[len("SCV "):]) for line in result.stdout.splitlines()
+             if line.startswith('SCV {"t":"stats"')]
+    assert any(s["verified_ops_s"] > 0 and s["bulk_ops_s"] > 0 for s in stats), stats
+
+    report = json.loads((history / "report.json").read_text())
+    assert report["bulk_ops"] > 0 and report["rows"] > 0 and report["violations"] == 0, report
+    rows = [json.loads(line) for line in (history / "rows.jsonl").read_text().splitlines()]
+    assert rows and all(row["verdict"] == "unchecked" for row in rows), rows

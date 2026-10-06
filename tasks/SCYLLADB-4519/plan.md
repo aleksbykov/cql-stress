@@ -376,11 +376,11 @@ start-up session; `--mode both` (task 18) gives bulk its own.
 
 **Files:** Modify: `main.rs`; Modify: `tools/test_cs_sc_verify.py`, `tools/cql-stress-cassandra-stress-ci.py`
 
-- [ ] Write pytest `run_both`: 60 s; every checked row is clean and bulk ops are > 0.
-- [ ] Run it and confirm the failure.
-- [ ] Run slots and bulk together in one process, each on its own session.
-- [ ] Run verify and the pytest.
-- [ ] Commit `feat: run checked and bulk load together [SCYLLADB-4519]`.
+- [x] Write pytest `run_both`: 60 s; every checked row is clean and bulk ops are > 0.
+- [x] Run it and confirm the failure. (exit 2: not implemented; then, after the first version, 0 bulk operations, caught by the `bulk_ops_s > 0` assertion: the dropped controller.)
+- [x] Run slots and bulk together in one process, each on its own session. (`run_checked(with_bulk)`: bulk connects its own session; its `RunController` is kept alive for the whole run, because dropping it stops the run at once; `stats` lines carry both rates; `report.json` the bulk totals.)
+- [x] Run verify and the pytest. (20 s: 512 checked + about 950 bulk ops/s, 64 rows, 0 violations; checked p99 rises from about 5 to 18–26 ms on this single local node, to be measured on a real cluster in the calibration run.)
+- [x] Commit `feat: run checked and bulk load together [SCYLLADB-4519]`.
 
 ## Task 19 — CI and image (T10)
 

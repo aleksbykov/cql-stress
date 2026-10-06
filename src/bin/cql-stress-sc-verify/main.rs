@@ -68,20 +68,35 @@ async fn main() -> Result<()> {
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
     match cli.mode {
-        Mode::Verify => run_verify(cli, profile, session).await,
+        Mode::Verify => run_checked(cli, profile, session, false).await,
+        Mode::Both => run_checked(cli, profile, session, true).await,
         Mode::Bulk => run_bulk(cli, profile, session).await,
-        Mode::Both => exit_setup_failure(anyhow::anyhow!(
-            "--mode both is not implemented yet; use --mode verify or --mode bulk"
-        )),
     }
 }
 
-/// The checked stream alone (`--mode verify`).
-async fn run_verify(cli: Cli, profile: Profile, session: Session) -> Result<()> {
+/// The checked stream, alone (`--mode verify`) or with bulk load (`--mode both`).
+async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bool) -> Result<()> {
     // Every checked statement, prepared once; this also proves the cluster accepts them.
     let statements = ops::Statements::prepare(&session, &profile, cli.ttl)
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
+    // Bulk gets its own session, so its requests never queue on the checked connections and
+    // stretch the measured operation times (spec §8.3).
+    let bulk = if with_bulk {
+        let tls = cli
+            .tls_context()
+            .unwrap_or_else(|err| exit_setup_failure(err));
+        let bulk_session = startup::connect(&cli, tls)
+            .await
+            .unwrap_or_else(|err| exit_setup_failure(err));
+        let stats = Arc::new(BulkStats::default());
+        let factory = BulkFactory::new(Arc::new(bulk_session), &profile, &cli, stats.clone())
+            .await
+            .unwrap_or_else(|err| exit_setup_failure(err));
+        Some((factory, stats))
+    } else {
+        None
+    };
 
     let pks = parse_population(&cli.pop)
         .unwrap_or_else(|err| exit_setup_failure(err))
@@ -89,7 +104,9 @@ async fn run_verify(cli: Cli, profile: Profile, session: Session) -> Result<()> 
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     let gens = GenMinter::new(now_ms).unwrap_or_else(|err| exit_setup_failure(err));
     let gen_base = gens.base();
-    let duration = cli.duration.expect("--mode verify requires --duration");
+    let duration = cli
+        .duration
+        .expect("--mode verify and --mode both require --duration");
     let mut recorder = Recorder::new(
         &cli.history_dir,
         profile.cells.len(),
@@ -133,11 +150,11 @@ async fn run_verify(cli: Cli, profile: Profile, session: Session) -> Result<()> 
         cli.slots, cli.clients_per_row, cli.pop
     );
     report::print(&Scv::Start {
-        mode: "verify",
+        mode: if bulk.is_some() { "both" } else { "verify" },
         pop: Some(&cli.pop),
         slots: cli.slots,
         gen_base: Some(gen_base),
-        bulk_pop: None,
+        bulk_pop: bulk.is_some().then_some(cli.bulk_pop.as_str()),
     });
 
     let (sealed_tx, mut sealed) = mpsc::unbounded_channel();
@@ -161,6 +178,15 @@ async fn run_verify(cli: Cli, profile: Profile, session: Session) -> Result<()> 
             checked.stop();
         })
     };
+    // The controller must live as long as the run: dropping it stops the run at once.
+    let (_bulk_controller, bulk_run, bulk_stats) = match bulk {
+        Some((factory, stats)) => {
+            let (controller, run) =
+                cql_stress::run::run(bulk_configuration(&checked.cli, factory, Some(duration)));
+            (Some(controller), Some(tokio::spawn(run)), Some(stats))
+        }
+        None => (None, None, None),
+    };
 
     let history_dir = checked.cli.history_dir.clone();
     let mut totals = Report::default();
@@ -174,10 +200,14 @@ async fn run_verify(cli: Cli, profile: Profile, session: Session) -> Result<()> 
                 record(&checked, &mut recorder, &mut totals, row);
             }
             _ = reports.tick() => {
-                let interval = checked.stats.take_interval(last_report.elapsed());
+                let elapsed = last_report.elapsed();
+                let mut interval = checked.stats.take_interval(elapsed);
+                if let Some(stats) = &bulk_stats {
+                    interval.bulk_ops_s = stats.take_interval() as f64 / elapsed.as_secs_f64();
+                }
                 last_report = Instant::now();
                 report::print(&Scv::Stats(interval));
-                write_report(&checked, &mut totals, &history_dir, None);
+                write_report(&checked, bulk_stats.as_deref(), &mut totals, &history_dir, None);
             }
         }
     }
@@ -192,15 +222,33 @@ async fn run_verify(cli: Cli, profile: Profile, session: Session) -> Result<()> 
         }
     }
     stopper.abort();
+    if let Some(bulk_run) = bulk_run {
+        if !matches!(bulk_run.await, Ok(Ok(()))) {
+            eprintln!("error: the bulk load failed");
+            checked.exit.raise(3);
+        }
+    }
     if totals.violations > 0 {
         checked.exit.raise(1);
     }
     let exit = checked.exit.get();
-    write_report(&checked, &mut totals, &history_dir, Some(exit));
+    write_report(
+        &checked,
+        bulk_stats.as_deref(),
+        &mut totals,
+        &history_dir,
+        Some(exit),
+    );
     println!(
         "Sealed {} rows, {} recorded operations, {} violations",
         totals.rows, totals.ops, totals.violations
     );
+    if bulk_stats.is_some() {
+        println!(
+            "Bulk: {} operations, {} reads found no row, {} failed attempts",
+            totals.bulk_ops, totals.bulk_misses, totals.bulk_errors
+        );
+    }
     report::print(&Scv::End { exit });
     std::process::exit(exit.into())
 }
@@ -224,15 +272,7 @@ async fn run_bulk(cli: Cli, profile: Profile, session: Session) -> Result<()> {
         bulk_pop: Some(&cli.bulk_pop),
     });
 
-    let (_controller, run) = cql_stress::run::run(Configuration {
-        max_duration: cli.duration,
-        concurrency: cli.bulk_threads,
-        rate_limit_per_second: (cli.bulk_rate > 0).then_some(cli.bulk_rate as f64),
-        operation_factory: Arc::new(factory),
-        max_retries_per_op: cli.bulk_retries,
-        // Bulk is load: an operation that keeps failing is counted and skipped.
-        ignore_errors: true,
-    });
+    let (_controller, run) = cql_stress::run::run(bulk_configuration(&cli, factory, cli.duration));
     tokio::pin!(run);
     let mut reports = tokio::time::interval(cli.report_interval);
     reports.tick().await; // the first tick is immediate
@@ -276,6 +316,22 @@ async fn run_bulk(cli: Cli, profile: Profile, session: Session) -> Result<()> {
     );
     report::print(&Scv::End { exit });
     std::process::exit(exit.into())
+}
+
+fn bulk_configuration(
+    cli: &Cli,
+    factory: BulkFactory,
+    max_duration: Option<std::time::Duration>,
+) -> Configuration {
+    Configuration {
+        max_duration,
+        concurrency: cli.bulk_threads,
+        rate_limit_per_second: (cli.bulk_rate > 0).then_some(cli.bulk_rate as f64),
+        operation_factory: Arc::new(factory),
+        max_retries_per_op: cli.bulk_retries,
+        // Bulk is load: an operation that keeps failing is counted and skipped.
+        ignore_errors: true,
+    }
 }
 
 /// Records a sealed row, adds it to the totals, and prints the SCV lines of its violations
@@ -328,7 +384,18 @@ fn record(checked: &Checked, recorder: &mut Recorder, totals: &mut Report, row: 
     }
 }
 
-fn write_report(checked: &Checked, totals: &mut Report, dir: &std::path::Path, exit: Option<u8>) {
+fn write_report(
+    checked: &Checked,
+    bulk: Option<&BulkStats>,
+    totals: &mut Report,
+    dir: &std::path::Path,
+    exit: Option<u8>,
+) {
+    if let Some(bulk) = bulk {
+        totals.bulk_ops = bulk.ops.load(Ordering::Relaxed);
+        totals.bulk_misses = bulk.misses.load(Ordering::Relaxed);
+        totals.bulk_errors = bulk.errors.load(Ordering::Relaxed);
+    }
     let latencies = checked.stats.totals();
     totals.read_p99_ms = latencies.read_p99_ms;
     totals.write_p99_ms = latencies.write_p99_ms;
