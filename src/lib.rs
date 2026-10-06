@@ -8,6 +8,8 @@ pub mod configuration;
 pub mod distribution;
 pub mod run;
 pub mod sharded_stats;
+#[cfg(feature = "strong-consistency")]
+pub mod strong_consistency;
 pub mod version;
 
 #[cfg(test)]

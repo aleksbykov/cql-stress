@@ -38,9 +38,9 @@ stays in every plan built from a spec.
 **Internals:** `pub mod strong_consistency` in `lib.rs`, gated on the feature;
 `pub use protocol_extensions::fetch_protocol_features`.
 
-- [ ] Move the file; point the binary's `use` at `cql_stress::strong_consistency::fetch_protocol_features`.
-- [ ] Run verify; the SC pytest still passes 5/5.
-- [ ] Commit `refactor: move the protocol extension probe into the library [SCYLLADB-4519]`.
+- [x] Move the file; point the binary's `use` at `cql_stress::strong_consistency::fetch_protocol_features`.
+- [x] Run verify; the SC pytest still passes 5/5.
+- [x] Commit `refactor: move the protocol extension probe into the library [SCYLLADB-4519]`.
 
 ## Task 2 — move the SC keyspace check into the library (T1)
 

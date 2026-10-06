@@ -6,8 +6,6 @@ use std::iter::Iterator;
 mod command;
 mod option;
 mod param;
-#[cfg(feature = "strong-consistency")]
-mod protocol_extensions;
 use anyhow::Context;
 use anyhow::Result;
 
@@ -43,7 +41,7 @@ use self::option::RateOption;
 use self::option::SchemaOption;
 use self::option::TransportOption;
 #[cfg(feature = "strong-consistency")]
-use self::protocol_extensions::fetch_protocol_features;
+use cql_stress::strong_consistency::fetch_protocol_features;
 
 pub struct CassandraStressSettings {
     pub command: Command,
