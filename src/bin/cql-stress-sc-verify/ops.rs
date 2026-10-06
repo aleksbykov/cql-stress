@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use scylla::client::execution_profile::ExecutionProfile;
 use scylla::client::session::Session;
+use scylla::errors::{DbError, ExecutionError, RequestAttemptError};
 use scylla::policies::retry::FallthroughRetryPolicy;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::statement::Consistency;
@@ -95,10 +96,73 @@ pub fn decode(cell: CellType, size: usize, value: &CqlValue) -> Result<u64> {
     Ok(wid)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    Read,
+    Write,
+}
+
+/// What a failed operation means for the history (spec §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// The write may or may not have been applied: recorded with a start and no end.
+    Indeterminate,
+    /// The write was certainly not applied (`--unavailable-is-fail`): recorded as `fail`, and
+    /// its wid is burned.
+    Fail,
+    /// A bug in the tool or the profile: not recorded, counted, fatal past
+    /// `--max-workload-errors`.
+    WorkloadError,
+    /// A failed read says nothing: not recorded.
+    ReadFailed,
+}
+
+/// Sorts a failed operation. When in doubt, a write's outcome is unknown: calling an unknown
+/// write failed would make false violations, while calling a failed write unknown only costs
+/// checker time.
+pub fn classify(op: OpKind, error: &ExecutionError, unavailable_is_fail: bool) -> Failure {
+    let db_error = match error {
+        ExecutionError::LastAttemptError(RequestAttemptError::DbError(db_error, _)) => {
+            Some(db_error)
+        }
+        _ => None,
+    };
+    let workload_error = matches!(
+        db_error,
+        Some(
+            DbError::SyntaxError
+                | DbError::Invalid
+                | DbError::Unauthorized
+                | DbError::AuthenticationError
+                | DbError::ConfigError
+                | DbError::AlreadyExists { .. }
+        )
+    ) || matches!(
+        error,
+        ExecutionError::BadQuery(_)
+            | ExecutionError::LastAttemptError(
+                RequestAttemptError::SerializationError(_)
+                    | RequestAttemptError::CqlRequestSerialization(_)
+            )
+    );
+
+    match op {
+        _ if workload_error => Failure::WorkloadError,
+        OpKind::Read => Failure::ReadFailed,
+        OpKind::Write
+            if unavailable_is_fail && matches!(db_error, Some(DbError::Unavailable { .. })) =>
+        {
+            Failure::Fail
+        }
+        OpKind::Write => Failure::Indeterminate,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use scylla::client::session_builder::SessionBuilder;
+    use scylla::errors::{BadQuery, BrokenConnectionErrorKind, ConnectionPoolError, WriteType};
     use scylla::policies::retry::FallthroughRetryPolicy;
     use std::time::Duration;
 
@@ -204,6 +268,97 @@ mod tests {
             assert!(
                 decode(cell, 32, &value).is_err(),
                 "{cell:?} {value:?} must not decode"
+            );
+        }
+    }
+
+    fn db(error: DbError) -> ExecutionError {
+        ExecutionError::LastAttemptError(RequestAttemptError::DbError(error, "msg".to_owned()))
+    }
+
+    fn unavailable() -> ExecutionError {
+        db(DbError::Unavailable {
+            consistency: Consistency::Quorum,
+            required: 2,
+            alive: 1,
+        })
+    }
+
+    #[test]
+    fn write_outcomes_test() {
+        let indeterminate = [
+            db(DbError::WriteTimeout {
+                consistency: Consistency::Quorum,
+                received: 1,
+                required: 2,
+                write_type: WriteType::Simple,
+            }),
+            db(DbError::ServerError),
+            db(DbError::Overloaded),
+            db(DbError::IsBootstrapping),
+            ExecutionError::RequestTimeout(Duration::from_secs(5)),
+            ExecutionError::LastAttemptError(RequestAttemptError::BrokenConnectionError(
+                BrokenConnectionErrorKind::KeepaliveTimeout([127, 0, 0, 1].into()).into(),
+            )),
+            ExecutionError::LastAttemptError(RequestAttemptError::UnableToAllocStreamId),
+            ExecutionError::EmptyPlan,
+            ExecutionError::ConnectionPoolError(ConnectionPoolError::Initializing),
+        ];
+        for error in indeterminate {
+            assert_eq!(
+                classify(OpKind::Write, &error, false),
+                Failure::Indeterminate,
+                "{error}"
+            );
+            assert_eq!(
+                classify(OpKind::Write, &error, true),
+                Failure::Indeterminate,
+                "{error}"
+            );
+        }
+
+        assert_eq!(
+            classify(OpKind::Write, &unavailable(), false),
+            Failure::Indeterminate
+        );
+        assert_eq!(classify(OpKind::Write, &unavailable(), true), Failure::Fail);
+    }
+
+    #[test]
+    fn workload_errors_test() {
+        for error in [
+            db(DbError::Invalid),
+            db(DbError::SyntaxError),
+            db(DbError::Unauthorized),
+            ExecutionError::BadQuery(BadQuery::PartitionKeyExtraction),
+        ] {
+            for op in [OpKind::Write, OpKind::Read] {
+                assert_eq!(
+                    classify(op, &error, false),
+                    Failure::WorkloadError,
+                    "{op:?} {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_reads_are_not_recorded_test() {
+        for error in [
+            unavailable(),
+            db(DbError::ServerError),
+            ExecutionError::RequestTimeout(Duration::from_secs(5)),
+            ExecutionError::EmptyPlan,
+        ] {
+            assert_eq!(
+                classify(OpKind::Read, &error, false),
+                Failure::ReadFailed,
+                "{error}"
+            );
+            assert_eq!(
+                classify(OpKind::Read, &error, true),
+                Failure::ReadFailed,
+                "{error}"
             );
         }
     }

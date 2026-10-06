@@ -199,15 +199,19 @@ wid ≥ 2^63. Until task 13 gives them a caller, `mod ops` carries `#[allow(dead
 
 **Files:** Modify: `src/bin/cql-stress-sc-verify/ops.rs`
 
-**Internals:** `enum Outcome { Ok, Indeterminate, Fail, WorkloadError, ReadFailed }`;
-`fn classify(op: OpKind, err: &ExecutionError, unavailable_is_fail: bool) -> Outcome`
-per the spec's outcome table.
+**Internals:** `enum Failure { Indeterminate, Fail, WorkloadError, ReadFailed }` (a success
+is not an error, so it is not a class); `enum OpKind { Read, Write }`;
+`fn classify(op: OpKind, err: &ExecutionError, unavailable_is_fail: bool) -> Failure` per the
+spec's outcome table. Workload errors: `SyntaxError`, `Invalid`, `Unauthorized`,
+`AuthenticationError`, `ConfigError`, `AlreadyExists`, `BadQuery`, request serialization.
+Any other write failure is indeterminate (`Unavailable` is `Fail` with the flag); any other
+read failure is not recorded.
 
-- [ ] Write table tests: write timeout, unknown-outcome server error, client timeout, broken connection, `Unavailable` with and without the flag, `InvalidRequest`, and a failed read.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify.
-- [ ] Commit `feat: classify checked operation outcomes [SCYLLADB-4519]`.
+- [x] Write table tests: write timeout, unknown-outcome server error, client timeout, broken connection, `Unavailable` with and without the flag, `InvalidRequest`, and a failed read.
+- [x] Run them and confirm the failure.
+- [x] Write the code.
+- [x] Run verify.
+- [x] Commit `feat: classify checked operation outcomes [SCYLLADB-4519]`.
 
 ## Task 11 — invariants engine (T5)
 
