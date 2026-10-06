@@ -300,8 +300,11 @@ SCV {"t":"canary","result":"illegal"}
 SCV {"t":"readback","rows":70112,"ok":70112,"lost":0,"phantom":0,"incomplete":0,"indet_total":913,"indet_landed":402}
 ```
 
-`stats` lines gain `"queue":<files waiting>`. `report.json` gains the checker, canary and
-read-back totals.
+`stats` lines gain `"queue":<files waiting>`. `report.json` gains, for SCT's Argus table:
+`rows_ok`, `rows_illegal`, `rows_unknown`, `rows_skipped` (row verdicts from the checker);
+`canaries_ok`, `canaries_failed`, `canaries_skipped`; and `readback`, which is null until
+the read-back ran, then `{rows, ok, lost, phantom, incomplete, expired, indet_total,
+indet_landed}` (`expired`: rows older than `--ttl`, not read).
 
 ### Deferred work
 
@@ -324,6 +327,7 @@ left to T25.
 - The `SCV violation` line is printed when the row seals, once its check file is in `archive/<seq>/`, so SCT can copy the evidence before it raises the event; `wall_ms` says when the read exposed the violation, so SCT still places it next to the nemesis that caused it. A human-readable line is printed at detection. The event is up to one row's life (about 13 s) late; SCT handles it by severity (user, Checkpoint B). (review)
 - `stats` lines cover one `--report-interval`; latencies are p99 of successful operations; `sched_delay_p99_ms` is how late the slots' burst ticks ran. (build)
 - In `rows.jsonl`, `errors` counts failed reads, `fail` writes and workload errors; indeterminate writes are counted only in `writes_indet`. (review)
+- **M2, a deliberate break:** `--checker on` is the default, so a checked run needs `porcupine_checker` at `--checker-bin` (the strong consistency image ships it). An M1-era command without `--checker off` exits 2 at start-up where no checker is installed; SCT passes `--checker off` explicitly for an M1 image. (spec)
 - **M2:** `--checker on` is the default. The canary corrupts the first read's first cell to the row's highest issued wid + 1, which no write produced, so the check fails at that read and costs almost nothing. (spec)
 - **M2:** with `--checker on`, a row's `rows.jsonl` line is written when its file has been checked. A kill loses the lines of rows whose file was still queued (their histories stay in `sealed/`), so after a kill `rows.jsonl` is not a complete list; at a normal end every row gets a line (`skipped` past `--checker-deadline`). (spec)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)

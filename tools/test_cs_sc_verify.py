@@ -338,7 +338,12 @@ def run_broken_checker(node, session, keyspace: str, tmp_path):
 
 
 def run_deleted_row(node, session, keyspace: str, tmp_path):
-    """A row deleted behind the tool's back is found lost by the read-back: exit 1."""
+    """A row deleted behind the tool's back is found lost by the read-back: exit 1.
+
+    It deletes through `cqlsh` inside the compose node's container (SCYLLA_SC_CONTAINER), so it
+    needs `docker`. Without it the test fails rather than skips: a skip would hide that the
+    read-back's `lost` path is not exercised.
+    """
     profile = write_profile(tmp_path / "profile.yaml", keyspace)
     history = tmp_path / "history"
     cmd = [BINARY, "--profile", profile, "--nodes", f"{node.ip}:{node.port}",
