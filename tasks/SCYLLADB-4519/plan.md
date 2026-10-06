@@ -441,18 +441,18 @@ use small fake checker scripts written into a temp dir; they need no Scylla.
 
 **Files:** Create: `src/bin/cql-stress-sc-verify/checker.rs`; Modify: `Cargo.toml` (optional `libc` in the feature)
 
-**Internals:** `async fn check_file(cfg, file, archive_dir) -> FileVerdicts`: spawns the
+**Internals:** `async fn check_file(cfg, file, rows, archive_dir) -> FileVerdicts` (`--key-timeout` is passed as milliseconds; the child's stderr goes to `archive_dir/checker.stderr`; `mod checker` keeps a dead-code allow until task 22): spawns the
 checker with stdin from the file, `GOMEMLIMIT`, and a `pre_exec` that sets `nice 10` and
 `RLIMIT_DATA`; reads stdout line by line into `key → ok|illegal|unknown`; kills it after
 `--checker-timeout`; a key without a line is `unknown`. `FileVerdicts { per_key, killed }`.
 
-- [ ] Write tests with fake checkers (shell scripts): all ok; one illegal; a checker that
+- [x] Write tests with fake checkers (shell scripts): all ok; one illegal; a checker that
       prints one line and then hangs (killed at the timeout, the rest `unknown`); one that
       crashes; and one that checks its own `nice` value and `GOMEMLIMIT`.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify.
-- [ ] Commit `feat: check a history file in a limited child process [SCYLLADB-4519]`.
+- [x] Run them and confirm the failure. (They failed to compile; after the code, dropping `nice` or the data limit each failed the limits test.)
+- [x] Write the code.
+- [x] Run verify.
+- [x] Commit `feat: check a history file in a limited child process [SCYLLADB-4519]`.
 
 ## Task 22 — the checker queue (T21)
 
@@ -473,6 +473,7 @@ what is left is `skipped`. `stats` gains `queue`; `report.json` gains checker to
       of a `--checker off` run.
 - [ ] Run it and confirm the failure.
 - [ ] Write the code.
+- [ ] Remove the dead-code allow on `mod checker`.
 - [ ] Run verify and the pytests.
 - [ ] Commit `feat: check sealed rows with porcupine_checker [SCYLLADB-4519]`.
 

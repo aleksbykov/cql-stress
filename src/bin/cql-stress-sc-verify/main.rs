@@ -5,6 +5,8 @@
 extern crate async_trait;
 
 mod bulk;
+// `check_file` gets its caller with the checker queue (plan task 22), which removes this allow.
+#[allow(dead_code)]
 mod checker;
 mod cli;
 mod history;

@@ -425,6 +425,7 @@ dependencies = [
  "hdrhistogram",
  "java_random",
  "lazy_static",
+ "libc",
  "ntest",
  "num-bigint",
  "openssl",

@@ -78,6 +78,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_yaml = { version = "0.9", optional = true }
 serde_json = { version = "1.0", optional = true }
+libc = { version = "0.2", optional = true }
 # Not optional: coordinator accounting identifies nodes by `Node::host_id`, which is a
 # `uuid::Uuid`, and that is unconditional. Unifies with the driver's own uuid dependency.
 uuid = "1.23"
@@ -106,6 +107,7 @@ timerfd = ["dep:tokio-timerfd"]
 strong-consistency = [
     "scylla/unstable-strong-consistency",
     "dep:clap",
+    "dep:libc",
     "dep:serde",
     "dep:serde_json",
     "dep:serde_yaml",
