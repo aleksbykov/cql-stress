@@ -18,7 +18,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::cli::Cli;
 use crate::history::OpRecord;
-use crate::invariants::{RowState, Seen, Violation, WriteEnd};
+use crate::invariants::{Expected, RowState, Seen, Violation, WriteEnd};
 use crate::keys::{GenMinter, RowKey};
 use crate::ops::{Failure, OpError, Statements};
 use crate::report::Stats;
@@ -149,6 +149,8 @@ pub struct SealedRow {
     pub stop_reason: StopReason,
     pub violations: Vec<Detected>,
     pub sweep_ok: bool,
+    /// The values each cell may still hold, for the read-back.
+    pub expected: Expected,
 }
 
 /// Everything the slots share.
@@ -359,9 +361,10 @@ async fn run_round(
         .map(|client| run_client(checked, &round, &key, client, ticks.clone(), row_start));
     futures::future::join_all(clients).await;
     // Drained: every operation of the row has returned.
-    let sweep_ok = sweep(checked, &round, &key).await;
+    let sweep_seen = sweep(checked, &round, &key).await;
 
     let round = round.into_inner().unwrap();
+    let expected = round.state.expected(sweep_seen.as_deref());
     let end_ns = checked.now_ns();
     SealedRow {
         key,
@@ -379,7 +382,8 @@ async fn run_round(
             / 1_000_000,
         stop_reason: round.stop.unwrap_or(StopReason::End),
         violations: round.violations,
-        sweep_ok,
+        sweep_ok: sweep_seen.is_some(),
+        expected,
     }
 }
 
@@ -488,8 +492,14 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
     });
 }
 
-/// One read, recorded and checked. Returns false when it failed and was not recorded.
-async fn read(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: usize) -> bool {
+/// One read, recorded and checked. Returns what it saw; `None` when it failed and was not
+/// recorded.
+async fn read(
+    checked: &Checked,
+    round: &Mutex<Round>,
+    key: &RowKey,
+    client: usize,
+) -> Option<Vec<Seen>> {
     let floors = round.lock().unwrap().state.snapshot();
     let start_ns = checked.now_ns();
     let result = checked.statements.read(&checked.session, key).await;
@@ -523,9 +533,9 @@ async fn read(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: usi
                 client,
                 start_ns,
                 end_ns,
-                seen,
+                seen: seen.clone(),
             });
-            true
+            Some(seen)
         }
         Err(error) => {
             round.errors += 1;
@@ -533,24 +543,25 @@ async fn read(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: usi
             if error.class == Failure::WorkloadError {
                 checked.workload_error(&error);
             }
-            false
+            None
         }
     }
 }
 
 /// The one final read of a drained row, the only place a retry is allowed: nothing else
-/// runs on the row any more, and only the successful attempt is recorded.
-async fn sweep(checked: &Checked, round: &Mutex<Round>, key: &RowKey) -> bool {
+/// runs on the row any more, and only the successful attempt is recorded. Returns what it
+/// saw; `None` when every attempt failed (`sweep: incomplete`).
+async fn sweep(checked: &Checked, round: &Mutex<Round>, key: &RowKey) -> Option<Vec<Seen>> {
     let client = checked.cli.clients_per_row;
     for attempt in 0..checked.cli.sweep_retries.max(1) {
         if attempt > 0 {
             tokio::time::sleep(checked.cli.sweep_backoff).await;
         }
-        if read(checked, round, key, client).await {
-            return true;
+        if let Some(seen) = read(checked, round, key, client).await {
+            return Some(seen);
         }
     }
-    false
+    None
 }
 
 pub fn unix_ms() -> u64 {

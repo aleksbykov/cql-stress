@@ -94,6 +94,15 @@ pub struct Floors {
     obs: Vec<Option<u64>>,
 }
 
+/// A retired row's expected final state (spec §12.1): per cell, the values it may hold
+/// (`None` = null); the highest wid issued; the burned wids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expected {
+    pub cells: Vec<Vec<Option<u64>>>,
+    pub max_wid: u64,
+    pub burned: Vec<u64>,
+}
+
 /// What the tool remembers about one live row (spec §10.1).
 #[derive(Debug)]
 pub struct RowState {
@@ -208,6 +217,64 @@ impl RowState {
                 }
             }
         }
+    }
+
+    /// The values each cell may still hold once the row is retired (spec §12.1), for the
+    /// read-back: `sweep` is what the sweep saw, `None` when it never succeeded.
+    pub fn expected(&self, sweep: Option<&[Seen]>) -> Expected {
+        let cells = (0..self.cells())
+            .map(|cell| {
+                let wrote = |write: &&Write| write.mask & (1 << cell) != 0;
+                let mut set: Vec<Option<u64>> = Vec::new();
+                match sweep {
+                    Some(seen) => match seen[cell] {
+                        Seen::Null => set.push(None),
+                        Seen::Wid(wid) => set.push(Some(wid)),
+                        // Already INV-0; no value of this tool can match it.
+                        Seen::Undecodable => {}
+                    },
+                    None => {
+                        let floor = self.floors.ack[cell];
+                        if floor.is_none() {
+                            set.push(None);
+                        }
+                        set.extend(self.wids().filter(|(_, w)| wrote(w)).filter_map(
+                            |(wid, write)| match write.status {
+                                WriteStatus::Ok(end) if floor.is_some_and(|f| end >= f) => {
+                                    Some(Some(wid))
+                                }
+                                _ => None,
+                            },
+                        ));
+                    }
+                }
+                // An indeterminate write may still land after anything else.
+                set.extend(
+                    self.wids()
+                        .filter(|(_, w)| wrote(w) && w.status == WriteStatus::Indeterminate)
+                        .map(|(wid, _)| Some(wid)),
+                );
+                set.sort();
+                set.dedup();
+                set
+            })
+            .collect();
+        Expected {
+            cells,
+            max_wid: self.writes.len() as u64,
+            burned: self
+                .wids()
+                .filter(|(_, w)| matches!(w.status, WriteStatus::Fail(_)))
+                .map(|(wid, _)| wid)
+                .collect(),
+        }
+    }
+
+    fn wids(&self) -> impl Iterator<Item = (u64, &Write)> {
+        self.writes
+            .iter()
+            .enumerate()
+            .map(|(i, write)| (i as u64 + 1, write))
     }
 
     fn cells(&self) -> usize {
@@ -427,6 +494,42 @@ mod tests {
             "end == start is not before"
         );
         assert!(read(&mut row, &[Wid(b)]).is_empty());
+    }
+
+    /// Spec §12.1, sweep ok: what the sweep saw, plus every indeterminate write to the cell,
+    /// which may still land after the sweep.
+    #[test]
+    fn expected_after_a_sweep_test() {
+        let mut row = RowState::new(2);
+        ok_write(&mut row, C0, 10, 20);
+        let w2 = ok_write(&mut row, C0, 30, 40);
+        let late = row.begin_write(C0, 50);
+        row.end_write(late, WriteEnd::Indeterminate);
+        let expected = row.expected(Some(&[Wid(w2), Null]));
+        assert_eq!(expected.cells, [vec![Some(w2), Some(late)], vec![None]]);
+        assert_eq!((expected.max_wid, expected.burned.len()), (3, 0));
+    }
+
+    /// Spec §12.1, sweep incomplete: every ok write that ended at or after the cell's ack floor
+    /// (the latest start of an ok write), every indeterminate write, and null while no write to
+    /// the cell was acknowledged.
+    #[test]
+    fn expected_without_a_sweep_test() {
+        let mut row = RowState::new(3);
+        ok_write(&mut row, C0, 10, 20); // ended before the floor (30): overwritten
+        let w2 = ok_write(&mut row, C0, 30, 40); // sets the floor
+        let w3 = ok_write(&mut row, C0, 25, 50); // overlaps w2: either may be last
+        let lost = row.begin_write(C1, 60); // c1: never acknowledged
+        row.end_write(lost, WriteEnd::Indeterminate);
+        let burned = row.begin_write(0b100, 70);
+        row.end_write(burned, WriteEnd::Fail(80));
+        let expected = row.expected(None);
+        assert_eq!(
+            expected.cells,
+            [vec![Some(w2), Some(w3)], vec![None, Some(lost)], vec![None]]
+        );
+        assert_eq!(expected.max_wid, 5);
+        assert_eq!(expected.burned, [burned]);
     }
 
     #[test]

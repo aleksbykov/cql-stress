@@ -259,6 +259,17 @@ pub struct RowLine {
     pub verdict: &'static str,
 }
 
+/// One line of `expected.jsonl`.
+#[derive(Serialize)]
+struct ExpectedLine<'a> {
+    pk: i64,
+    gen: String,
+    ck: i32,
+    cells: &'a [Vec<Option<u64>>],
+    max_wid: u64,
+    burned: &'a [u64],
+}
+
 /// A row of a closed check file whose verdict waits for the checker.
 #[derive(Debug, Clone)]
 pub struct PendingRow {
@@ -298,6 +309,7 @@ pub struct Recorder {
     check_age: Duration,
     defer: bool,
     rows: BufWriter<File>,
+    expected: BufWriter<File>,
     open: Option<(CheckFile, u64, Instant)>,
     pending: Vec<PendingRow>,
     next_seq: u64,
@@ -331,11 +343,15 @@ impl Recorder {
             })
             .max()
             .map_or(0, |seq| seq + 1);
-        let rows = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("rows.jsonl"))
-            .with_context(|| format!("Failed to open {}", dir.join("rows.jsonl").display()))?;
+        let append = |name: &str| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(name))
+                .with_context(|| format!("Failed to open {}", dir.join(name).display()))
+        };
+        let rows = append("rows.jsonl")?;
+        let expected = append("expected.jsonl")?;
         Ok(Self {
             dir: dir.to_owned(),
             cells,
@@ -343,6 +359,7 @@ impl Recorder {
             check_age,
             defer,
             rows: BufWriter::new(rows),
+            expected: BufWriter::new(expected),
             open: None,
             pending: Vec::new(),
             next_seq,
@@ -384,6 +401,7 @@ impl Recorder {
             // Without the checker a row is a violation or unchecked (spec §4.3).
             verdict: if violated { "violation" } else { "unchecked" },
         };
+        self.write_expected(row)?;
         if self.defer {
             self.pending.push(PendingRow { line, violated });
         } else {
@@ -397,6 +415,26 @@ impl Recorder {
             return self.close(false);
         }
         Ok(Recorded::default())
+    }
+
+    /// Appends the row's expected final state to `expected.jsonl` (spec §12.1).
+    fn write_expected(&mut self, row: &SealedRow) -> Result<()> {
+        let line = ExpectedLine {
+            pk: row.key.pk,
+            gen: row.key.gen.to_string(),
+            ck: row.key.ck,
+            cells: &row.expected.cells,
+            max_wid: row.expected.max_wid,
+            burned: &row.expected.burned,
+        };
+        let out = &mut self.expected;
+        let result = (|| -> Result<()> {
+            serde_json::to_writer(&mut *out, &line)?;
+            out.write_all(b"\n")?;
+            out.flush()?;
+            Ok(())
+        })();
+        result.context("Failed to write expected.jsonl")
     }
 
     /// Writes a row's final line to `rows.jsonl`.
@@ -480,7 +518,7 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::invariants::{Inv, Seen, Violation, WriteStatus};
+    use crate::invariants::{Expected, Inv, Seen, Violation, WriteStatus};
     use crate::slot::{Detected, StopReason};
 
     /// The v2 contract with porcupine_validator, which keeps a byte-for-byte copy as
@@ -510,6 +548,11 @@ mod tests {
             errors: 1,
             max_gap_ms: 7,
             stop_reason: StopReason::Ops,
+            expected: Expected {
+                cells: vec![vec![None, Some(3)]],
+                max_wid: 4,
+                burned: vec![2],
+            },
             violations: vec![
                 Detected {
                     violation: Violation {
@@ -574,6 +617,15 @@ mod tests {
 
         let rows = lines(&dir.join("rows.jsonl"));
         assert_eq!(rows.len(), 4, "rows.jsonl is appended to, never truncated");
+        let expected = lines(&dir.join("expected.jsonl"));
+        assert_eq!(expected.len(), 4);
+        assert_eq!(
+            expected[2],
+            format!(
+                "{{\"pk\":2,\"gen\":\"{}\",\"ck\":0,\"cells\":[[null,3]],\"max_wid\":4,\"burned\":[2]}}",
+                (1i64 << 60) + 2
+            )
+        );
         assert_eq!(
             rows[2],
             format!(

@@ -507,12 +507,12 @@ write to the cell; sweep incomplete → every ok write to the cell that ended at
 `ack_floor`, every indeterminate write, and null if no write to the cell was acknowledged.
 The recorder appends it to `expected.jsonl`.
 
-- [ ] Write tests: sweep ok with and without indeterminate writes; sweep incomplete with an
+- [x] Write tests: sweep ok with and without indeterminate writes; sweep incomplete with an
       acknowledged write, with only indeterminate writes, and with a burned wid.
-- [ ] Run them and confirm the failure.
-- [ ] Write the code.
-- [ ] Run verify.
-- [ ] Commit `feat: record each row's expected final state [SCYLLADB-4519]`.
+- [x] Run them and confirm the failure. (Compile error; after the code, dropping the indeterminate writes or the null each failed a test. `read`/`sweep` now return what they saw; `SealedRow.expected`; the recorder appends `expected.jsonl`, whose line format the recorder test pins.)
+- [x] Write the code.
+- [x] Run verify.
+- [x] Commit `feat: record each row's expected final state [SCYLLADB-4519]`.
 
 ## Task 25 — the read-back (T23)
 
