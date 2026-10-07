@@ -14,6 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import sc_verify_mutate
 from test_cs_strong_consistency import UNAVAILABLE_CODE, keyspace_consistency
 
 BINARY = "cql-stress-sc-verify"
@@ -408,3 +409,37 @@ def run_tiny_checker_mem(node, session, keyspace: str, tmp_path):
     rows = rows_of(history)
     assert rows and all(row["verdict"] == "unknown" for row in rows), \
         {row["verdict"] for row in rows}
+
+
+def run_mutation_matrix(node, session, keyspace: str, tmp_path):
+    """Each kind of anomaly, injected into a real history, is judged illegal by the checker,
+    and only in the rows it was injected into; legal changes leave every row ok."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "30s", "--checker", "off", "--readback", "off",
+                         "--check-age", "5s")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+    # The fullest check file: most rows, so most kinds find eligible operations.
+    source = max((history / "sealed").glob("*.jsonl"), key=lambda f: f.read_text().count("# key"))
+    text = source.read_text()
+
+    for kind in sc_verify_mutate.KINDS:
+        mutated, keys = sc_verify_mutate.mutate(text, kind, rows=5)
+        if kind in sc_verify_mutate.ILLEGAL:
+            assert keys, f"{kind}: no row of {source.name} had eligible operations"
+        path = tmp_path / f"{kind}.jsonl"
+        path.write_text(mutated)
+        with path.open() as stdin:
+            checker = subprocess.run([checker_bin(), "--output-dir", str(tmp_path / kind)],
+                                     stdin=stdin, capture_output=True, text=True, timeout=300)
+        # Only the visualization notes; anything else (a parse error) would hide as unknown.
+        errors = [line for line in checker.stderr.splitlines()
+                  if line and not line.startswith("visualization written to ")]
+        assert not errors, f"{kind}: {errors}"
+        results = {line["key"]: line["result"] for line in map(json.loads, checker.stdout.splitlines())
+                   if "key" in line}
+        bad = "illegal" if kind in sc_verify_mutate.ILLEGAL else "ok"
+        expected = {key: bad if key in keys else "ok" for key in results}
+        assert results == expected, f"{kind}: mutated rows {sorted(keys)}"
+        assert checker.returncode == (1 if kind in sc_verify_mutate.ILLEGAL else 0), kind
+

@@ -567,10 +567,10 @@ ScyllaDB 2026.4 nightly.
 find the first eligible ops and rewrite one read's cell; write the mutated file; the
 pytest runs `porcupine_checker` on each and compares per-row results with the expected.
 
-- [ ] Write the pytest first (it fails: no mutator).
-- [ ] Write the mutator; every class has a docstring proof of why it is illegal (or legal).
-- [ ] Map each class to its invariant unit test; add any that is missing.
-- [ ] Run verify; commit `test: show the checker rejects each kind of anomaly [SCYLLADB-4519]`.
+- [x] Write the pytest first (it fails: no mutator). (ModuleNotFoundError.)
+- [x] Write the mutator; every class has a docstring proof of why it is illegal (or legal). (On a 50-row file of a quiet run: stale, backwards, future, phantom 50/50 rows illegal; torn 47/47 (3 rows without a full write); identity, drop-read, unack-write, shift 50/50 ok. The checker prints "visualization written to" on stderr, so the test fails on any other stderr line.)
+- [x] Map each class to its invariant unit test; add any that is missing. (stale → `inv1_read_your_writes_test`, backwards → `inv2_never_goes_backwards_test`, torn → `inv3_no_torn_row_test`, phantom and future → `inv0_no_phantom_value_test`: online, a write issued after the read is checked is indistinguishable from one never issued. None missing.)
+- [x] Run verify; commit `test: show the checker rejects each kind of anomaly [SCYLLADB-4519]`.
 
 ## Task 29 — replayed writes
 
