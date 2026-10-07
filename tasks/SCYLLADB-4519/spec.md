@@ -322,6 +322,7 @@ left to T25.
 - The Confluence spec is the design source; this file condenses the part that cql-stress builds. (spec)
 - `unavailable_error` takes the reported mode as text and a `tls` flag, so the cassandra-stress message stays the same for TLS runs. (build)
 - One spec for all of M1, not split off for the T1/T2 library move: Confluence §6 sets one PR per repo per milestone. (review)
+- M1 and M2 ship in one PR, #206: it already held every M1 commit, and SCT builds directly on M2. #205 (M1 alone) was closed; Confluence §6 now makes cql-stress the exception to one PR per milestone. (user, 2026-10-07)
 - `clap` is added for the new binary's CLI (user, 2026-09-25). (spec)
 - The binary has `required-features = ["strong-consistency"]`, and that feature also turns on `serde`, `serde_yaml` and `clap`. A default build stays as it is. (spec)
 - TLS is in M1: `--ssl` with PEM files through `openssl`. The server certificate is verified only when `--ssl-ca` is given, as in cassandra-stress (user, 2026-10-06). (spec)
