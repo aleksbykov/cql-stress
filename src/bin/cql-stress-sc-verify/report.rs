@@ -109,7 +109,11 @@ pub fn print(scv: &Scv) {
 pub struct IntervalStats {
     /// When the interval ended, so SCT can place it next to nemesis events.
     pub wall_ms: u64,
+    /// Completed operations of the checked stream: successful reads and writes, and writes
+    /// with an unknown outcome.
     pub verified_ops_s: f64,
+    /// The rest: failed reads (the sweep's too), `fail` writes and workload errors.
+    pub failed_ops_s: f64,
     pub bulk_ops_s: f64,
     pub read_p99_ms: f64,
     pub write_p99_ms: f64,
@@ -170,6 +174,7 @@ pub struct Stats {
     writes: AtomicU64,
     indet: AtomicU64,
     indet_total: AtomicU64,
+    failed: AtomicU64,
 }
 
 impl Stats {
@@ -191,6 +196,11 @@ impl Stats {
         self.indet_total.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A failed operation other than an indeterminate write, as `rows.jsonl` counts `errors`.
+    pub fn failed(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn sched_delay(&self, late: Duration) {
         self.sched.lock().record(late);
     }
@@ -200,6 +210,7 @@ impl Stats {
         let ops = self.ops.swap(0, Ordering::Relaxed);
         let writes = self.writes.swap(0, Ordering::Relaxed);
         let indet = self.indet.swap(0, Ordering::Relaxed);
+        let failed = self.failed.swap(0, Ordering::Relaxed);
         let p99_and_reset = |hist: &Mutex<Hist>| {
             let mut hist = hist.lock();
             let p99 = p99_ms(&hist.interval);
@@ -209,6 +220,7 @@ impl Stats {
         IntervalStats {
             wall_ms: crate::slot::unix_ms(),
             verified_ops_s: ops as f64 / elapsed.as_secs_f64(),
+            failed_ops_s: failed as f64 / elapsed.as_secs_f64(),
             bulk_ops_s: 0.0,
             read_p99_ms: p99_and_reset(&self.read),
             write_p99_ms: p99_and_reset(&self.write),
@@ -349,6 +361,7 @@ mod tests {
         let stats = Scv::Stats(IntervalStats {
             wall_ms: 1791293683732,
             verified_ops_s: 1234.5,
+            failed_ops_s: 0.5,
             bulk_ops_s: 0.0,
             read_p99_ms: 1.5,
             write_p99_ms: 2.25,
@@ -358,7 +371,7 @@ mod tests {
         });
         assert_eq!(
             line(&stats),
-            r#"SCV {"t":"stats","wall_ms":1791293683732,"verified_ops_s":1234.5,"bulk_ops_s":0.0,"read_p99_ms":1.5,"write_p99_ms":2.25,"indet_pct":0.0,"queue":3,"sched_delay_p99_ms":0.125}"#
+            r#"SCV {"t":"stats","wall_ms":1791293683732,"verified_ops_s":1234.5,"failed_ops_s":0.5,"bulk_ops_s":0.0,"read_p99_ms":1.5,"write_p99_ms":2.25,"indet_pct":0.0,"queue":3,"sched_delay_p99_ms":0.125}"#
         );
         let checked = Scv::Checked {
             file: "12".to_owned(),
@@ -396,6 +409,8 @@ mod tests {
         stats.write_indeterminate();
         stats.write_indeterminate();
         stats.write_indeterminate();
+        stats.failed();
+        stats.failed();
         stats.sched_delay(Duration::from_micros(250));
 
         let before = crate::slot::unix_ms();
@@ -419,13 +434,22 @@ mod tests {
             interval.write_p99_ms
         );
         assert_eq!(interval.indet_pct, 75.0, "3 of 4 writes");
+        assert_eq!(
+            interval.failed_ops_s, 1.0,
+            "2 failed / 2 s, counted apart from the completed operations"
+        );
         assert!((0.24..=0.26).contains(&interval.sched_delay_p99_ms));
 
         // An interval starts empty; the totals keep everything.
         let next = stats.take_interval(Duration::from_secs(1));
         assert_eq!(
-            (next.verified_ops_s, next.read_p99_ms, next.indet_pct),
-            (0.0, 0.0, 0.0)
+            (
+                next.verified_ops_s,
+                next.failed_ops_s,
+                next.read_p99_ms,
+                next.indet_pct
+            ),
+            (0.0, 0.0, 0.0, 0.0)
         );
         let totals = stats.totals();
         assert!((99.0..=100.0).contains(&totals.read_p99_ms));

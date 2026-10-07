@@ -469,12 +469,14 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
                 Failure::Fail => {
                     round.state.end_write(wid, WriteEnd::Fail(end_ns));
                     round.errors += 1;
+                    checked.stats.failed();
                 }
                 Failure::WorkloadError | Failure::ReadFailed => {
                     // Rejected outright: never recorded. Burned, so a cell showing it is a
                     // phantom.
                     round.state.end_write(wid, WriteEnd::Fail(end_ns));
                     round.errors += 1;
+                    checked.stats.failed();
                     drop(round);
                     checked.workload_error(&error);
                     return;
@@ -539,6 +541,7 @@ async fn read(
         }
         Err(error) => {
             round.errors += 1;
+            checked.stats.failed();
             drop(guard);
             if error.class == Failure::WorkloadError {
                 checked.workload_error(&error);
