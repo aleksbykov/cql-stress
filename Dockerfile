@@ -1,7 +1,8 @@
-# porcupine_checker (porcupine_validator checker-v2), pinned here once: CI's strong
-# consistency tests take the checker from this image too. `COPY --from` does not expand an
-# ARG, so the image is a stage of its own.
-ARG CHECKER_IMAGE=aleksbykov/porcupine_validator:v2-0cdfd5c
+# porcupine_checker (porcupine_validator checker-v2), pinned here once and by digest: CI's
+# strong consistency tests take the checker from this image too. `COPY --from` does not expand
+# an ARG, so the image is a stage of its own. The image is amd64-only for now, and the builder
+# below refuses a checker that cannot run on the build platform.
+ARG CHECKER_IMAGE=aleksbykov/porcupine_validator:v2-0cdfd5c@sha256:ddd5b9c1c6bea3fd01228ad00228b23cbae09fb8e6a2aea7ca3b79aa4d7a92fc
 FROM ${CHECKER_IMAGE} AS checker
 
 # Must be >= the `rust-version` in Cargo.toml (1.89.0). scylla-rust-driver 1.9.0 is
@@ -38,9 +39,11 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     pkg-config \
     && cargo build --profile dist --all ${CARGO_BUILD_FEATURES:+--features "$CARGO_BUILD_FEATURES"} \
-    && case ",${CARGO_BUILD_FEATURES}," in \
-         *,strong-consistency,*) cp /tmp/porcupine_checker target/dist/porcupine_checker ;; \
-       esac
+    && if echo "$CARGO_BUILD_FEATURES" | tr ', ' '\n\n' | grep -qx strong-consistency; then \
+         /tmp/porcupine_checker < /dev/null 2>/dev/null; rc=$? ; \
+         [ "$rc" -eq 2 ] || { echo "porcupine_checker does not run here (exit $rc)" >&2; exit 1; } ; \
+         cp /tmp/porcupine_checker target/dist/porcupine_checker ; \
+       fi
 
 FROM debian:bookworm-slim AS production
 
