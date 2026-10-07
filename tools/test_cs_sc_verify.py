@@ -69,6 +69,12 @@ def run_schema(node, session, keyspace: str, tmp_path):
         "c1": ("text", "regular"),
         "c2": ("blob", "regular"),
     }
+    # The tablet count is a table option: ScyllaDB deprecates the keyspace's 'initial'.
+    tablets = session.execute(
+        "SELECT tablets FROM system_schema.scylla_tables "
+        "WHERE keyspace_name = %s AND table_name = %s", (keyspace, "reg")).one()
+    assert tablets and tablets.tablets == {"min_tablet_count": "4"}, tablets
+    assert "deprecated" not in result.stdout + result.stderr
 
     print("\n=== A second start over the same schema is fine ===\n")
     assert sc_verify(node, profile).returncode == 0

@@ -134,9 +134,9 @@ Schema (§7.1), created with `IF NOT EXISTS` by every mode:
 
 ```sql
 CREATE KEYSPACE sc_verify WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3}
-  AND tablets = {'initial': 128} AND consistency = 'global';
+  AND tablets = {'enabled': true} AND consistency = 'global';
 CREATE TABLE sc_verify.reg (pk bigint, gen bigint, ck int, c0 bigint, c1 text, c2 blob,
-  PRIMARY KEY ((pk), gen, ck));
+  PRIMARY KEY ((pk), gen, ck)) WITH tablets = {'min_tablet_count': 128};
 ```
 
 Keys: checked `gen = start_unix_ms × 2^20 + n` (≥ 2^60); bulk `gen = f(pk) < 2^40`.
@@ -340,6 +340,7 @@ left to T25.
 - **M2:** `report.json` counts the checker's illegal rows in `checker_illegal`, apart from the rows' verdicts: a violation outranks the checker's verdict, so `rows_illegal` alone hides that the checker caught the same rows (local validation, finding 3). (review)
 - **M2:** every `stats` line carries `wall_ms`, the time it was printed: SCT places the intervals next to nemesis events without guessing from the report cadence (local validation, finding 4). (review)
 - **M2:** `stats` lines count failed operations in `failed_ops_s`, defined as `errors` in `rows.jsonl`, apart from `verified_ops_s`, which keeps counting completed ones: without it an outage showed 0 ops/s with nothing failing (local validation, finding 5). (review)
+- **M2:** the profile's `tablets_initial` becomes the table's `min_tablet_count`, and the keyspace only enables tablets: ScyllaDB deprecates the keyspace's `initial` option and warns on every start. Tables created before keep their tablets; the column check does not look at the tablet count (local validation, finding 8). (review)
 - **M2:** the Dockerfile pins the checker image by digest, and a `strong-consistency` build fails unless the copied checker runs (exit 2 on empty input), so a checker of the wrong architecture cannot ship. The checker image is amd64-only for now, so the strong consistency image is too; arm64 waits for a multi-arch checker image, and the image moves to the `scylladb` organisation once porcupine_validator PR #5 merges. (review)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)

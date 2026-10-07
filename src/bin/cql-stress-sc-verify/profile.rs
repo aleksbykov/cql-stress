@@ -16,7 +16,8 @@ const MAX_CELLS: usize = 8;
 pub struct Profile {
     pub keyspace: String,
     pub replication_factor: u32,
-    /// Fixed for the whole run: SC tablets are never split or merged (spec F9).
+    /// The table's `min_tablet_count`, fixed for the whole run: SC tablets are never split or
+    /// merged (spec F9).
     pub tablets_initial: u32,
     pub table: String,
     pub cells: Vec<CellType>,
@@ -99,12 +100,13 @@ impl Profile {
         format!(
             "CREATE KEYSPACE IF NOT EXISTS {} WITH replication = \
              {{'class': 'NetworkTopologyStrategy', 'replication_factor': {}}} \
-             AND tablets = {{'initial': {}}} AND consistency = 'global'",
-            self.keyspace, self.replication_factor, self.tablets_initial
+             AND tablets = {{'enabled': true}} AND consistency = 'global'",
+            self.keyspace, self.replication_factor
         )
     }
 
-    /// The DDL of the checked table or of the bulk table: both have the same columns.
+    /// The DDL of the checked table or of the bulk table: both have the same columns. The
+    /// tablet count is a table option; ScyllaDB deprecates the keyspace's `initial`.
     pub fn table_ddl(&self, table: &str) -> String {
         let cells: String = self
             .cells
@@ -114,8 +116,9 @@ impl Profile {
             .collect();
         format!(
             "CREATE TABLE IF NOT EXISTS {}.{table} (pk bigint, gen bigint, ck int, \
-             {cells}PRIMARY KEY ((pk), gen, ck))",
-            self.keyspace
+             {cells}PRIMARY KEY ((pk), gen, ck)) \
+             WITH tablets = {{'min_tablet_count': {}}}",
+            self.keyspace, self.tablets_initial
         )
     }
 
@@ -170,12 +173,13 @@ bulk_table: null
             profile.keyspace_ddl(),
             "CREATE KEYSPACE IF NOT EXISTS sc_verify WITH replication = \
              {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} \
-             AND tablets = {'initial': 128} AND consistency = 'global'"
+             AND tablets = {'enabled': true} AND consistency = 'global'"
         );
         assert_eq!(
             profile.table_ddl(&profile.table),
             "CREATE TABLE IF NOT EXISTS sc_verify.reg (pk bigint, gen bigint, ck int, \
-             c0 bigint, c1 text, c2 blob, PRIMARY KEY ((pk), gen, ck))"
+             c0 bigint, c1 text, c2 blob, PRIMARY KEY ((pk), gen, ck)) \
+             WITH tablets = {'min_tablet_count': 128}"
         );
         assert_eq!(
             profile.cells,
