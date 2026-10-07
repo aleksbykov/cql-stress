@@ -271,6 +271,9 @@ pub struct Report {
     pub rows_illegal: u64,
     pub rows_unknown: u64,
     pub rows_skipped: u64,
+    /// Rows the checker judged illegal, including those whose verdict is `violation` because
+    /// an invariant fired too: the sum of `illegal` over the `SCV checked` lines.
+    pub checker_illegal: u64,
     /// Canaries the checker rejected, as it must; ones it did not (`verifier-broken`); ones
     /// the queue or the end of the run left unchecked.
     pub canaries_ok: u64,

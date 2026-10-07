@@ -684,6 +684,7 @@ fn file_verdicts(
             }
             RowResult::Illegal => {
                 illegal += 1;
+                totals.checker_illegal += 1;
                 "illegal"
             }
             RowResult::Unknown => {

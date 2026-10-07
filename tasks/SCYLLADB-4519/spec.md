@@ -302,6 +302,8 @@ SCV {"t":"readback","rows":70112,"ok":70112,"lost":0,"phantom":0,"incomplete":0,
 
 `stats` lines gain `"queue":<files waiting>`. `report.json` gains, for SCT's Argus table:
 `rows_ok`, `rows_illegal`, `rows_unknown`, `rows_skipped` (row verdicts from the checker);
+`checker_illegal` (rows the checker judged illegal, including those whose verdict is
+`violation`);
 `canaries_ok`, `canaries_failed`, `canaries_skipped`; and `readback`, which is null until
 the read-back ran, then `{rows, ok, lost, phantom, incomplete, expired, indet_total,
 indet_landed}` (`expired`: rows older than `--ttl`, not read).
@@ -333,6 +335,7 @@ left to T25.
 - **M2:** with `--ttl`, the read-back skips a row once it started more than 0.9 × TTL ago, judged just before reading it: a cell may be as old as the row, and an expired cell must never be judged `lost`. They are counted as `expired`. (review)
 - **M2:** a restarted process never reuses a check-file number: the next is one above the highest in `sealed/`, `archive/` and `rows.jsonl`; canaries are named after their source file. (review)
 - **M2:** the test-only `--fault-stale-reads` applies to the clients' reads, never to the sweep: the expected state is built from what the sweep saw, so a stale sweep would make the read-back report rows `lost` that the database kept (local validation, finding 1). (review)
+- **M2:** `report.json` counts the checker's illegal rows in `checker_illegal`, apart from the rows' verdicts: a violation outranks the checker's verdict, so `rows_illegal` alone hides that the checker caught the same rows (local validation, finding 3). (review)
 - **M2:** the Dockerfile pins the checker image by digest, and a `strong-consistency` build fails unless the copied checker runs (exit 2 on empty input), so a checker of the wrong architecture cannot ship. The checker image is amd64-only for now, so the strong consistency image is too; arm64 waits for a multi-arch checker image, and the image moves to the `scylladb` organisation once porcupine_validator PR #5 merges. (review)
 - M1 accepts only `--checker off`, so SCT commands written for M1 stay valid in M2. (spec)
 - The moved code keeps its names, except that `diagnose_missing_strong_consistency` becomes the free function `diagnose_v2`. One `#[cfg(feature = "strong-consistency")]` on the library module replaces the per-item gates. The parts specific to cassandra-stress stay in that binary: the CL check and the datacenter warning. (review)

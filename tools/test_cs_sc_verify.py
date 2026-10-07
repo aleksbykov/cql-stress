@@ -126,9 +126,12 @@ def run_verify_quiet(node, session, keyspace: str, tmp_path):
 
 
 def run_stale_reads(node, session, keyspace: str, tmp_path):
-    """The test-only fault serves stale reads: the invariants must catch them, with evidence."""
+    """The test-only fault serves stale reads: the invariants and the checker must both catch
+    them, with evidence."""
     profile = write_profile(tmp_path / "profile.yaml", keyspace)
-    result = sc_verify(node, profile, "--fault-stale-reads", "0.2", duration="15s")
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "15s", "--fault-stale-reads", "0.2",
+                         "--checker-bin", checker_bin(), "--check-age", "5s")
     assert result.returncode == 1, f"expected exit 1, got {result.returncode}"
 
     violations = [json.loads(line[len("SCV "):]) for line in result.stdout.splitlines()
@@ -139,7 +142,6 @@ def run_stale_reads(node, session, keyspace: str, tmp_path):
     assert end == ['SCV {"t":"end","exit":1}'], end
 
     # The evidence is on disk: the archived check file holds the violating row.
-    history = tmp_path / "history"
     first = violations[0]
     archived = (history / first["archive"] / f"{first['archive'].split('/')[1]}.jsonl").read_text()
     assert f'pk {first["pk"]} gen "{first["gen"]}"' in archived
@@ -151,6 +153,14 @@ def run_stale_reads(node, session, keyspace: str, tmp_path):
     # so the expected state is right and the read-back finds nothing lost.
     readback = scv_lines(result.stdout, "readback")
     assert readback and readback[0]["lost"] == readback[0]["phantom"] == 0, readback
+
+    # The checker judged rows illegal on its own, the violated ones too. A violation outranks
+    # its verdict, so report.json counts the checker's illegal rows apart from the verdicts;
+    # rows_illegal holds only those the invariants missed.
+    report = json.loads((history / "report.json").read_text())
+    checked = scv_lines(result.stdout, "checked")
+    assert report["checker_illegal"] == sum(c["illegal"] for c in checked), report
+    assert report["checker_illegal"] > report["rows_illegal"], report
 
 
 def bulk(node, profile: str, history, *args: str) -> dict:
