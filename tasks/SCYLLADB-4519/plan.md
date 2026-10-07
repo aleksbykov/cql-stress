@@ -552,3 +552,56 @@ porcupine_validator `v2-<sha>` image), for both architectures; the ordinary imag
       plus the M1 tests unchanged. (17 SC pytests: the canary run now also reads back ok; `--mode both` uses the real checker and wants every row `ok`; new: `--checker-mem 1M` → the Go runtime cannot start, rows `unknown`. Rust tests also pass on the plain node, as in CI. The first full run failed only because the host disk was 99% full and ScyllaDB rejected writes; after pruning the Docker build cache, all green.)
 
 **Checkpoint F** (human review): the §20.5 integration list is green; the CS M2 PR is ready.
+
+# Positive controls (branch `feat/sc-verify-m2`)
+
+The same rules apply. Tasks 28–31 map to the tracking phase 7. All local runs use the
+ScyllaDB 2026.4 nightly.
+
+## Task 28 — the mutation matrix
+
+**Files:** Create: `tools/sc_verify_mutate.py`; Modify: `tools/test_cs_sc_verify.py`,
+`tools/cql-stress-cassandra-stress-ci.py`
+
+**Internals:** parse a check file into rows (`# key` headers, call/return lines); per class,
+find the first eligible ops and rewrite one read's cell; write the mutated file; the
+pytest runs `porcupine_checker` on each and compares per-row results with the expected.
+
+- [ ] Write the pytest first (it fails: no mutator).
+- [ ] Write the mutator; every class has a docstring proof of why it is illegal (or legal).
+- [ ] Map each class to its invariant unit test; add any that is missing.
+- [ ] Run verify; commit `test: show the checker rejects each kind of anomaly [SCYLLADB-4519]`.
+
+## Task 29 — replayed writes
+
+**Files:** Modify: `cli.rs`, `slot.rs`, `tools/test_cs_sc_verify.py`,
+`tools/cql-stress-cassandra-stress-ci.py`
+
+**Internals:** the round keeps its acknowledged writes `(wid, mask, end)`; after an
+acknowledged write, with probability `--fault-replay-writes`, it resends the newest older
+one superseded on some cell, unrecorded, result ignored.
+
+- [ ] Write the pytest first (it fails: unknown flag): violations > 0, `checker_illegal` > 0,
+      exit 1, read-back `lost == phantom == 0`.
+- [ ] Write the code; a unit test for choosing the write to replay.
+- [ ] Run verify; commit `test: add a replayed-write fault the verifier must catch [SCYLLADB-4519]`.
+
+## Task 30 — the eventually consistent mode
+
+**Files:** Modify: `cli.rs`, `profile.rs`, `startup.rs`, `ops.rs`, `tools/test_cs_sc_verify.py`
+
+**Internals:** `--unsafe-eventual` (hidden); `CheckedConsistency::One` only with it; the
+keyspace DDL without `consistency = 'global'`; start-up requires a keyspace that is not
+strongly consistent.
+
+- [ ] Write tests first: `--consistency one` rejected without the flag; the DDL without
+      `consistency`; a pytest on the compose node: an eventually consistent keyspace is
+      created and a short run at ONE is clean (one node cannot be stale).
+- [ ] Write the code.
+- [ ] Run verify; commit `test: add an eventually consistent mode for the verifier's controls [SCYLLADB-4519]`.
+
+## Task 31 — local cluster runs
+
+On a 3-node RF 3 nightly cluster: the replayed-write fault on SC; the eventually consistent
+control (hinted handoff off, a node stopped ~30 s under load, long rows) and its SC
+negative control. Results in the tracking repo `results/`.

@@ -316,6 +316,30 @@ The later phases (§17) need `ck`, which stays 0. `indet_landed` is a run total;
 it by quiet and disrupted rows is SCT's job from `expected.jsonl` and `readback.jsonl` and is
 left to T25.
 
+## Positive controls
+
+Confluence §20.5, "Positive controls": show that the verifier finds real linearizability
+errors of each kind and stays quiet on legal histories, on local clusters with a ScyllaDB
+2026.4 nightly. The tracking design is `work/phase-7-positive-controls/00-design.md`.
+
+- **Mutation matrix.** `tools/sc_verify_mutate.py` takes a real check file and injects one
+  anomaly into a chosen row, deterministically (the first eligible ops in op order):
+  `stale`, `torn`, `backwards`, `future`, `phantom`, each illegal by construction; and the
+  negative controls `identity`, `drop-read`, `unack-write` (an acknowledged write's return
+  line dropped), `shift` (all times shifted). The pytest records a quiet `--checker off`
+  run, mutates each class into its own file, runs `porcupine_checker`, and wants: mutated
+  rows `illegal`, all other rows `ok`, empty checker stderr.
+- **`--fault-replay-writes <p>`** (hidden, test-only, default 0): right after a write is
+  acknowledged and recorded, with probability p the client resends, unrecorded and with its
+  result ignored, the newest older acknowledged write of the row that a newer acknowledged
+  write has superseded on at least one cell. Expected: violations, `checker_illegal` > 0,
+  exit 1, a clean read-back.
+- **`--unsafe-eventual`** (hidden, test-only): the keyspace DDL leaves out
+  `consistency = 'global'`; the start-up check requires the keyspace NOT to be strongly
+  consistent instead; `--consistency one` is accepted (rejected without the flag). Used on
+  a local 3-node cluster with hinted handoff off and a node stopped under load: the
+  read-back at ONE finds `lost` > 0.
+
 ## Decisions
 
 - One task directory covers all CS work for SCYLLADB-4519; the small steps live in `plan.md`, not in Jira subtasks. (spec)
@@ -337,6 +361,8 @@ left to T25.
 - **M2:** with `--checker on`, a row's `rows.jsonl` line is written when its file has been checked. A kill loses the lines of rows whose file was still queued (their histories stay in `sealed/`), so after a kill `rows.jsonl` is not a complete list; at a normal end every row gets a line (`skipped` past `--checker-deadline`). (spec)
 - **M2:** with `--ttl`, the read-back skips a row once it started more than 0.9 × TTL ago, judged just before reading it: a cell may be as old as the row, and an expired cell must never be judged `lost`. They are counted as `expired`. (review)
 - **M2:** a restarted process never reuses a check-file number: the next is one above the highest in `sealed/`, `archive/` and `rows.jsonl`; canaries are named after their source file. (review)
+- **Positive controls:** the replayed write is the one deliberate retry on the checked path, test-only and hidden; the eventually consistent mode is test-only and hidden too. Neither is ever set by SCT (Confluence §20.6). (user, 2026-10-07)
+- **Positive controls:** a fake-ack fault (a write recorded but never sent) is left out: it is tool-made, and the deleted-row test already covers `lost`. (spec)
 - **M2:** the test-only `--fault-stale-reads` applies to the clients' reads, never to the sweep: the expected state is built from what the sweep saw, so a stale sweep would make the read-back report rows `lost` that the database kept (local validation, finding 1). (review)
 - **M2:** `report.json` counts the checker's illegal rows in `checker_illegal`, apart from the rows' verdicts: a violation outranks the checker's verdict, so `rows_illegal` alone hides that the checker caught the same rows (local validation, finding 3). (review)
 - **M2:** every `stats` line carries `wall_ms`, the time it was printed: SCT places the intervals next to nemesis events without guessing from the report cadence (local validation, finding 4). (review)
