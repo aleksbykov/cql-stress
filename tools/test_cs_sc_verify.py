@@ -200,7 +200,9 @@ def run_both(node, session, keyspace: str, tmp_path):
            "--report-interval", "5s", "--history-dir", str(history),
            "--checker-bin", checker_bin(), "--check-age", "5s"]
     print(" ".join(cmd))
+    started_ms = time.time() * 1000
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    ended_ms = time.time() * 1000
     print(result.stdout, result.stderr, sep="\n")
     assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
     assert '"mode":"both"' in result.stdout and '"bulk_pop":' in result.stdout
@@ -208,6 +210,9 @@ def run_both(node, session, keyspace: str, tmp_path):
     stats = [json.loads(line[len("SCV "):]) for line in result.stdout.splitlines()
              if line.startswith('SCV {"t":"stats"')]
     assert any(s["verified_ops_s"] > 0 and s["bulk_ops_s"] > 0 for s in stats), stats
+    # Each stats line says when it was printed, so SCT can place it next to nemesis events.
+    stamps = [s["wall_ms"] for s in stats]
+    assert stamps == sorted(stamps) and started_ms <= stamps[0] <= stamps[-1] <= ended_ms, stamps
 
     report = json.loads((history / "report.json").read_text())
     assert report["bulk_ops"] > 0 and report["rows"] > 0 and report["violations"] == 0, report

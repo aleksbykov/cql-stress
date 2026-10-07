@@ -107,6 +107,8 @@ pub fn print(scv: &Scv) {
 /// One `--report-interval` of the checked stream and the bulk load.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Default)]
 pub struct IntervalStats {
+    /// When the interval ended, so SCT can place it next to nemesis events.
+    pub wall_ms: u64,
     pub verified_ops_s: f64,
     pub bulk_ops_s: f64,
     pub read_p99_ms: f64,
@@ -205,6 +207,7 @@ impl Stats {
             p99
         };
         IntervalStats {
+            wall_ms: crate::slot::unix_ms(),
             verified_ops_s: ops as f64 / elapsed.as_secs_f64(),
             bulk_ops_s: 0.0,
             read_p99_ms: p99_and_reset(&self.read),
@@ -344,6 +347,7 @@ mod tests {
             r#"SCV {"t":"violation","kind":"INV-3","pk":7,"gen":"1878307305715400705","cell":"c1","wall_ms":1791293683732,"archive":"archive/12"}"#
         );
         let stats = Scv::Stats(IntervalStats {
+            wall_ms: 1791293683732,
             verified_ops_s: 1234.5,
             bulk_ops_s: 0.0,
             read_p99_ms: 1.5,
@@ -354,7 +358,7 @@ mod tests {
         });
         assert_eq!(
             line(&stats),
-            r#"SCV {"t":"stats","verified_ops_s":1234.5,"bulk_ops_s":0.0,"read_p99_ms":1.5,"write_p99_ms":2.25,"indet_pct":0.0,"queue":3,"sched_delay_p99_ms":0.125}"#
+            r#"SCV {"t":"stats","wall_ms":1791293683732,"verified_ops_s":1234.5,"bulk_ops_s":0.0,"read_p99_ms":1.5,"write_p99_ms":2.25,"indet_pct":0.0,"queue":3,"sched_delay_p99_ms":0.125}"#
         );
         let checked = Scv::Checked {
             file: "12".to_owned(),
@@ -394,7 +398,12 @@ mod tests {
         stats.write_indeterminate();
         stats.sched_delay(Duration::from_micros(250));
 
+        let before = crate::slot::unix_ms();
         let interval = stats.take_interval(Duration::from_secs(2));
+        assert!(
+            (before..=crate::slot::unix_ms()).contains(&interval.wall_ms),
+            "stamped when taken"
+        );
         assert_eq!(
             interval.verified_ops_s, 52.0,
             "(100 reads + 4 writes) / 2 s"

@@ -377,6 +377,7 @@ async fn run_bulk(cli: Cli, profile: Profile, session: Session) -> Result<()> {
             _ = reports.tick() => {
                 let ops = stats.take_interval();
                 report::print(&Scv::Stats(IntervalStats {
+                    wall_ms: slot::unix_ms(),
                     bulk_ops_s: ops as f64 / last_report.elapsed().as_secs_f64(),
                     ..IntervalStats::default()
                 }));
