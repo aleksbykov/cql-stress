@@ -605,3 +605,8 @@ strongly consistent.
 On a 3-node RF 3 nightly cluster: the replayed-write fault on SC; the eventually consistent
 control (hinted handoff off, a node stopped ~30 s under load, long rows) and its SC
 negative control. Results in the tracking repo `results/`.
+
+Done on nightly 20261006 (tracking `results/2026-10-07-controls/README.md`):
+- replay on SC, 320 rows: 203 flagged by the invariants, 205 judged illegal by porcupine (all 203 + 2), read-back clean, exit 1;
+- eventually consistent at ONE, `scv-n3` stopped 45 s: 274 rows illegal (35 by the invariants), read-back 166 lost (all overlapping the outage), exit 1; with long rows: 112 illegal, 7 lost;
+- the SC negative control under the same stop: 608 rows ok, read-back clean, exit 0.
