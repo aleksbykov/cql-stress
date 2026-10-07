@@ -147,6 +147,11 @@ def run_stale_reads(node, session, keyspace: str, tmp_path):
     violated = [row for row in rows if row["verdict"] == "violation"]
     assert violated and all(row["invariants"] == "violation" for row in violated)
 
+    # The fault is in the tool's reads, not in the database: the sweep must read the truth,
+    # so the expected state is right and the read-back finds nothing lost.
+    readback = scv_lines(result.stdout, "readback")
+    assert readback and readback[0]["lost"] == readback[0]["phantom"] == 0, readback
+
 
 def bulk(node, profile: str, history, *args: str) -> dict:
     """Runs bulk mode and returns its report.json."""

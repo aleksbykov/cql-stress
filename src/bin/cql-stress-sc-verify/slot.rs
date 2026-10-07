@@ -428,7 +428,7 @@ async fn run_client(
         }
 
         if random_bool(checked.cli.read_ratio) {
-            read(checked, round, key, client).await;
+            read(checked, round, key, client, checked.cli.fault_stale_reads).await;
         } else {
             write(checked, round, key, client).await;
         }
@@ -493,12 +493,13 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
 }
 
 /// One read, recorded and checked. Returns what it saw; `None` when it failed and was not
-/// recorded.
+/// recorded. `fault` is the share served stale by `--fault-stale-reads`.
 async fn read(
     checked: &Checked,
     round: &Mutex<Round>,
     key: &RowKey,
     client: usize,
+    fault: f64,
 ) -> Option<Vec<Seen>> {
     let floors = round.lock().unwrap().state.snapshot();
     let start_ns = checked.now_ns();
@@ -509,7 +510,6 @@ async fn read(
     let round = &mut *guard;
     match result {
         Ok(mut seen) => {
-            let fault = checked.cli.fault_stale_reads;
             match &round.first_seen {
                 None => round.first_seen = Some(seen.clone()),
                 Some(first) if fault > 0.0 && random_bool(fault) => seen = first.clone(),
@@ -550,14 +550,15 @@ async fn read(
 
 /// The one final read of a drained row, the only place a retry is allowed: nothing else
 /// runs on the row any more, and only the successful attempt is recorded. Returns what it
-/// saw; `None` when every attempt failed (`sweep: incomplete`).
+/// saw; `None` when every attempt failed (`sweep: incomplete`). The stale-read fault never
+/// applies: the row's expected state is built from what the sweep saw.
 async fn sweep(checked: &Checked, round: &Mutex<Round>, key: &RowKey) -> Option<Vec<Seen>> {
     let client = checked.cli.clients_per_row;
     for attempt in 0..checked.cli.sweep_retries.max(1) {
         if attempt > 0 {
             tokio::time::sleep(checked.cli.sweep_backoff).await;
         }
-        if let Some(seen) = read(checked, round, key, client).await {
+        if let Some(seen) = read(checked, round, key, client, 0.0).await {
             return Some(seen);
         }
     }
