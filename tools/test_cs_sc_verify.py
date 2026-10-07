@@ -443,3 +443,19 @@ def run_mutation_matrix(node, session, keyspace: str, tmp_path):
         assert results == expected, f"{kind}: mutated rows {sorted(keys)}"
         assert checker.returncode == (1 if kind in sc_verify_mutate.ILLEGAL else 0), kind
 
+
+def run_replay_writes(node, session, keyspace: str, tmp_path):
+    """Sending an older acknowledged write again makes the database return values the history
+    cannot explain: the invariants and the checker must both catch it. The read-back stays
+    clean, since the expected state comes from what the database holds."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "20s", "--fault-replay-writes", "0.05",
+                         "--checker-bin", checker_bin(), "--check-age", "5s")
+    assert result.returncode == 1, f"expected exit 1, got {result.returncode}"
+    assert scv_lines(result.stdout, "violation"), "no SCV violation line"
+    report = json.loads((history / "report.json").read_text())
+    assert report["violations"] > 0 and report["checker_illegal"] > 0, report
+    readback = scv_lines(result.stdout, "readback")
+    assert readback and readback[0]["lost"] == readback[0]["phantom"] == 0, readback
+

@@ -156,6 +156,12 @@ pub struct Cli {
     /// instead, a stale read the invariants must catch (milestone 1 "can fail").
     #[arg(long, hide = true, default_value_t = 0.0, value_parser = ratio)]
     pub fault_stale_reads: f64,
+
+    /// Test only: with this probability, right after a write is acknowledged, an older
+    /// acknowledged write of the row that a newer one superseded is sent again, unrecorded.
+    /// The database applies it, so later reads show values no order explains.
+    #[arg(long, hide = true, default_value_t = 0.0, value_parser = ratio)]
+    pub fault_replay_writes: f64,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,8 +397,9 @@ mod tests {
         assert_eq!(cli.report_interval, Duration::from_secs(10));
         assert!(!cli.ssl);
         assert_eq!(
-            cli.fault_stale_reads, 0.0,
-            "the fault is off unless asked for"
+            (cli.fault_stale_reads, cli.fault_replay_writes),
+            (0.0, 0.0),
+            "the faults are off unless asked for"
         );
     }
 

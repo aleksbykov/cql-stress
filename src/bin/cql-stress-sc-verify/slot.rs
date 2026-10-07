@@ -260,6 +260,32 @@ struct Round {
     stop: Option<StopReason>,
     /// What the row's first recorded read saw; `--fault-stale-reads` serves it again.
     first_seen: Option<Vec<Seen>>,
+    /// The row's acknowledged writes, for `--fault-replay-writes`.
+    acked: Vec<Acked>,
+}
+
+/// An acknowledged write of a row.
+#[derive(Clone, Copy, Debug)]
+struct Acked {
+    wid: u64,
+    mask: u8,
+    call_ns: u64,
+    end_ns: u64,
+}
+
+/// The newest acknowledged write that a later one surely superseded: one called after it
+/// returned and sharing a cell with it. Sending anything else again may change nothing.
+fn superseded(acked: &[Acked]) -> Option<&Acked> {
+    acked
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(i, write)| {
+            acked[i + 1..]
+                .iter()
+                .any(|later| later.call_ns > write.end_ns && later.mask & write.mask != 0)
+        })
+        .map(|(_, write)| write)
 }
 
 impl Round {
@@ -355,6 +381,7 @@ async fn run_round(
         max_gap_ns: 0,
         stop: None,
         first_seen: None,
+        acked: Vec::new(),
     });
 
     let clients = (0..checked.cli.clients_per_row)
@@ -451,13 +478,56 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
         .await;
     let end_ns = checked.now_ns();
 
+    let replay = record_write(
+        checked,
+        round,
+        client,
+        (wid, mask),
+        (start_ns, end_ns),
+        result,
+    );
+    // `--fault-replay-writes`: the older write again, unrecorded, whatever it returns.
+    if let Some(old) = replay {
+        let _ = checked
+            .statements
+            .write(
+                &checked.session,
+                key,
+                old.mask,
+                old.wid,
+                checked.cli.unavailable_is_fail,
+            )
+            .await;
+    }
+}
+
+/// Records a write that returned, and picks the write `--fault-replay-writes` sends again.
+fn record_write(
+    checked: &Checked,
+    round: &Mutex<Round>,
+    client: usize,
+    (wid, mask): (u64, u8),
+    (start_ns, end_ns): (u64, u64),
+    result: Result<(), OpError>,
+) -> Option<Acked> {
     let mut round = round.lock().unwrap();
+    let mut replay = None;
     match result {
         Ok(()) => {
             round.state.end_write(wid, WriteEnd::Ok(end_ns));
             round.writes_ok += 1;
             round.succeeded(end_ns);
             checked.stats.write(Duration::from_nanos(end_ns - start_ns));
+            round.acked.push(Acked {
+                wid,
+                mask,
+                call_ns: start_ns,
+                end_ns,
+            });
+            let fault = checked.cli.fault_replay_writes;
+            if fault > 0.0 && random_bool(fault) {
+                replay = superseded(&round.acked).copied();
+            }
         }
         Err(error) => {
             match error.class {
@@ -479,7 +549,7 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
                     checked.stats.failed();
                     drop(round);
                     checked.workload_error(&error);
-                    return;
+                    return None;
                 }
             }
         }
@@ -492,6 +562,7 @@ async fn write(checked: &Checked, round: &Mutex<Round>, key: &RowKey, client: us
         start_ns,
         status,
     });
+    replay
 }
 
 /// One read, recorded and checked. Returns what it saw; `None` when it failed and was not
@@ -637,6 +708,34 @@ mod tests {
         // The row's own limit names the reason even when the run ends at the same moment.
         assert_eq!(check(10, 0, 8, true), Some(StopReason::Indeterminate));
         assert_eq!(StopReason::Indeterminate.as_str(), "indeterminate");
+    }
+
+    #[test]
+    fn a_replayed_write_is_one_a_later_write_superseded_test() {
+        let acked = |wid, mask, call_ns, end_ns| Acked {
+            wid,
+            mask,
+            call_ns,
+            end_ns,
+        };
+        // 3 was called after 1 returned and shares cell 0 with it; 2 shares no cell with 3.
+        let writes = [
+            acked(1, 0b011, 0, 10),
+            acked(2, 0b100, 5, 20),
+            acked(3, 0b001, 30, 40),
+        ];
+        assert_eq!(superseded(&writes).map(|w| w.wid), Some(1));
+        // Overlapping writes: 2 may be applied before 1, so 1 is not surely superseded.
+        let overlapping = [acked(1, 0b001, 0, 10), acked(2, 0b001, 5, 20)];
+        assert_eq!(superseded(&overlapping).map(|w| w.wid), None);
+        assert_eq!(superseded(&writes[..1]).map(|w| w.wid), None);
+        // The newest candidate wins.
+        let many = [
+            acked(1, 0b001, 0, 10),
+            acked(2, 0b001, 20, 30),
+            acked(3, 0b001, 40, 50),
+        ];
+        assert_eq!(superseded(&many).map(|w| w.wid), Some(2));
     }
 
     #[test]

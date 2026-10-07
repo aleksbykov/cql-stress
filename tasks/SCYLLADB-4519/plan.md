@@ -581,10 +581,10 @@ pytest runs `porcupine_checker` on each and compares per-row results with the ex
 acknowledged write, with probability `--fault-replay-writes`, it resends the newest older
 one superseded on some cell, unrecorded, result ignored.
 
-- [ ] Write the pytest first (it fails: unknown flag): violations > 0, `checker_illegal` > 0,
-      exit 1, read-back `lost == phantom == 0`.
-- [ ] Write the code; a unit test for choosing the write to replay.
-- [ ] Run verify; commit `test: add a replayed-write fault the verifier must catch [SCYLLADB-4519]`.
+- [x] Write the pytest first (it fails: unknown flag): violations > 0, `checker_illegal` > 0,
+      exit 1, read-back `lost == phantom == 0`. (Exit 2, "unexpected argument".)
+- [x] Write the code; a unit test for choosing the write to replay. (A write is surely superseded only by a later write called after it returned that shares a cell; overlapping writes are not. The recording moved into a sync `record_write`, so no lock guard lives across the replay's `await`.)
+- [x] Run verify; commit `test: add a replayed-write fault the verifier must catch [SCYLLADB-4519]`. (3 runs out of 3 pass on nightly 20261006; one run: 64 rows, 39 hit by a replay, 711 violations, `checker_illegal` 39 = exactly those rows, the other 25 `ok`, read-back 64/64 `ok`.)
 
 ## Task 30 — the eventually consistent mode
 
