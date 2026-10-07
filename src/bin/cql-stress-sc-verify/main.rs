@@ -171,8 +171,10 @@ async fn run_checked(cli: Cli, profile: Profile, session: Session, with_bulk: bo
     }
 
     println!(
-        "Start-up checks passed: {}.{} is strongly consistent and matches the profile",
-        profile.keyspace, profile.table
+        "Start-up checks passed: {}.{} is {} and matches the profile",
+        profile.keyspace,
+        profile.table,
+        consistency_kind(&checked.cli)
     );
     let cli = &checked.cli;
     println!(
@@ -354,9 +356,10 @@ async fn run_bulk(cli: Cli, profile: Profile, session: Session) -> Result<()> {
         .await
         .unwrap_or_else(|err| exit_setup_failure(err));
     println!(
-        "Start-up checks passed: {}.{} is strongly consistent and matches the profile",
+        "Start-up checks passed: {}.{} is {} and matches the profile",
         profile.keyspace,
-        profile.bulk_table_name()
+        profile.bulk_table_name(),
+        consistency_kind(&cli)
     );
     report::print(&Scv::Start {
         mode: "bulk",
@@ -778,6 +781,14 @@ fn write_report(
     totals.exit = exit;
     if let Err(err) = totals.write(dir) {
         tracing::warn!("failed to write report.json: {err:#}");
+    }
+}
+
+fn consistency_kind(cli: &Cli) -> &'static str {
+    if cli.unsafe_eventual {
+        "eventually consistent (--unsafe-eventual, a test of the verifier only)"
+    } else {
+        "strongly consistent"
     }
 }
 

@@ -96,12 +96,19 @@ impl Profile {
         Ok(())
     }
 
-    pub fn keyspace_ddl(&self) -> String {
+    /// `strongly_consistent` is false only for the test-only `--unsafe-eventual`.
+    pub fn keyspace_ddl(&self, strongly_consistent: bool) -> String {
         format!(
             "CREATE KEYSPACE IF NOT EXISTS {} WITH replication = \
              {{'class': 'NetworkTopologyStrategy', 'replication_factor': {}}} \
-             AND tablets = {{'enabled': true}} AND consistency = 'global'",
-            self.keyspace, self.replication_factor
+             AND tablets = {{'enabled': true}}{}",
+            self.keyspace,
+            self.replication_factor,
+            if strongly_consistent {
+                " AND consistency = 'global'"
+            } else {
+                ""
+            }
         )
     }
 
@@ -170,10 +177,17 @@ bulk_table: null
     fn default_profile_ddl_test() {
         let profile = Profile::parse(DEFAULT).unwrap();
         assert_eq!(
-            profile.keyspace_ddl(),
+            profile.keyspace_ddl(true),
             "CREATE KEYSPACE IF NOT EXISTS sc_verify WITH replication = \
              {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} \
              AND tablets = {'enabled': true} AND consistency = 'global'"
+        );
+        // --unsafe-eventual: the same keyspace without strong consistency.
+        assert_eq!(
+            profile.keyspace_ddl(false),
+            "CREATE KEYSPACE IF NOT EXISTS sc_verify WITH replication = \
+             {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} \
+             AND tablets = {'enabled': true}"
         );
         assert_eq!(
             profile.table_ddl(&profile.table),

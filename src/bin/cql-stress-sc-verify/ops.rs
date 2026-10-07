@@ -34,6 +34,7 @@ pub fn checked_profile(
         .consistency(match consistency {
             CheckedConsistency::Quorum => Consistency::Quorum,
             CheckedConsistency::LocalQuorum => Consistency::LocalQuorum,
+            CheckedConsistency::One => Consistency::One,
         })
         .request_timeout(Some(request_timeout))
         .retry_policy(Arc::new(FallthroughRetryPolicy::new()))
@@ -347,6 +348,8 @@ mod tests {
 
         let profile = checked_profile(CheckedConsistency::LocalQuorum, Duration::from_millis(250));
         assert_eq!(profile.get_consistency(), Consistency::LocalQuorum);
+        let profile = checked_profile(CheckedConsistency::One, Duration::from_millis(250));
+        assert_eq!(profile.get_consistency(), Consistency::One);
         assert_eq!(
             profile.get_request_timeout(),
             Some(Duration::from_millis(250))

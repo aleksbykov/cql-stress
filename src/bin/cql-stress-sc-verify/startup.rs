@@ -43,14 +43,21 @@ pub async fn connect(cli: &Cli, tls: Option<SslContext>) -> Result<Session> {
 pub async fn startup(session: &Session, profile: &Profile, cli: &Cli) -> Result<()> {
     let keyspace = &profile.keyspace;
     session
-        .query_unpaged(profile.keyspace_ddl(), ())
+        .query_unpaged(profile.keyspace_ddl(!cli.unsafe_eventual), ())
         .await
         .with_context(|| format!("Failed to create keyspace {keyspace}"))?;
 
     // Before any table goes into it: a leftover eventually consistent keyspace is not
     // upgraded by CREATE KEYSPACE IF NOT EXISTS.
     let mode = keyspace_consistency_mode(session, keyspace).await?;
-    if !matches!(mode, Some(ConsistencyMode::Global)) {
+    if cli.unsafe_eventual {
+        // The control needs a keyspace whose reads may really be stale.
+        anyhow::ensure!(
+            !matches!(mode, Some(ConsistencyMode::Global)),
+            "--unsafe-eventual needs an eventually consistent keyspace; {keyspace} is strongly \
+             consistent"
+        );
+    } else if !matches!(mode, Some(ConsistencyMode::Global)) {
         let reported = match &mode {
             Some(mode) => format!("{mode:?}"),
             None => String::from("unknown (keyspace not found in cluster metadata)"),
@@ -58,7 +65,7 @@ pub async fn startup(session: &Session, profile: &Profile, cli: &Cli) -> Result<
         return Err(unavailable_error(
             keyspace,
             &reported,
-            &profile.keyspace_ddl(),
+            &profile.keyspace_ddl(true),
             &cli.nodes,
             cli.ssl,
         )

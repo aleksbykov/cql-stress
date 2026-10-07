@@ -30,6 +30,7 @@ from test_cs_sc_verify import run_deleted_row as run_sc_verify_deleted_row
 from test_cs_sc_verify import run_tiny_checker_mem as run_sc_verify_tiny_checker_mem
 from test_cs_sc_verify import run_mutation_matrix as run_sc_verify_mutation_matrix
 from test_cs_sc_verify import run_replay_writes as run_sc_verify_replay_writes
+from test_cs_sc_verify import run_unsafe_eventual as run_sc_verify_unsafe_eventual
 
 
 # Utils for test cases
@@ -358,3 +359,11 @@ def test_strong_consistency_sc_verify_replay_writes(
         tmp_path):
     run_sc_verify_replay_writes(node=strong_consistency_node, session=strong_consistency_session,
                                 keyspace=strong_consistency_keyspace, tmp_path=tmp_path)
+
+
+def test_strong_consistency_sc_verify_unsafe_eventual(
+        strong_consistency_node, strong_consistency_session, strong_consistency_keyspace,
+        tmp_path):
+    run_sc_verify_unsafe_eventual(node=strong_consistency_node,
+                                  session=strong_consistency_session,
+                                  keyspace=strong_consistency_keyspace, tmp_path=tmp_path)

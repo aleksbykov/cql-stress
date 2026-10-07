@@ -162,6 +162,12 @@ pub struct Cli {
     /// The database applies it, so later reads show values no order explains.
     #[arg(long, hide = true, default_value_t = 0.0, value_parser = ratio)]
     pub fault_replay_writes: f64,
+
+    /// Test only: the keyspace is created, and required to be, eventually consistent, and
+    /// `--consistency one` is allowed, so a cluster fault produces real stale reads the
+    /// verifier must catch. Never for a real test of strong consistency.
+    #[arg(long, hide = true)]
+    pub unsafe_eventual: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +181,8 @@ pub enum Mode {
 pub enum CheckedConsistency {
     Quorum,
     LocalQuorum,
+    /// Only with `--unsafe-eventual`: strongly consistent tables reject it.
+    One,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +225,10 @@ impl Cli {
         anyhow::ensure!(
             cli.duration.is_some() || cli.ops.is_some(),
             "give --duration, or -n with --mode bulk"
+        );
+        anyhow::ensure!(
+            cli.consistency != CheckedConsistency::One || cli.unsafe_eventual,
+            "--consistency one is only for --unsafe-eventual, a test of the verifier itself"
         );
         // Zero here would panic (an interval of 0) or spin (rows sealed with no operations).
         for (name, zero) in [
@@ -428,6 +440,7 @@ mod tests {
             "--duration 1m --report-interval 0ms",
             "--duration 1m --slots 0",
             "--duration 1m --ops-per-gen 0",
+            "--duration 1m --consistency one",
         ] {
             assert!(parse(bad).is_err(), "{bad:?} must be rejected");
         }
@@ -439,6 +452,10 @@ mod tests {
         assert!(parse("--duration 1m --ttl 950").is_ok());
         assert!(parse("--duration 1m --ttl 949").is_err());
         assert!(parse("--duration 250ms --nodes a,b:9043 --consistency local-quorum").is_ok());
+        // ONE only for the eventually consistent control, never on a checked SC run.
+        let cli = parse("--duration 1m --unsafe-eventual --consistency one").unwrap();
+        assert!(cli.unsafe_eventual && cli.consistency == CheckedConsistency::One);
+        assert!(!parse("--duration 1m").unwrap().unsafe_eventual);
     }
 
     #[test]

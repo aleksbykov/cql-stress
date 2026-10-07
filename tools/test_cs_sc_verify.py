@@ -459,3 +459,25 @@ def run_replay_writes(node, session, keyspace: str, tmp_path):
     readback = scv_lines(result.stdout, "readback")
     assert readback and readback[0]["lost"] == readback[0]["phantom"] == 0, readback
 
+
+def run_unsafe_eventual(node, session, keyspace: str, tmp_path):
+    """The test-only eventually consistent mode creates a keyspace that is not strongly
+    consistent and runs at ONE. One node cannot serve stale data, so the run is clean. A
+    normal run refuses that keyspace, and the mode refuses a strongly consistent one."""
+    profile = write_profile(tmp_path / "profile.yaml", keyspace)
+    history = tmp_path / "history"
+    result = checked_run(node, profile, history, "10s", "--unsafe-eventual", "--consistency", "one",
+                         "--checker-bin", checker_bin(), "--check-age", "5s")
+    assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+    assert keyspace_consistency(session, keyspace) != "global"
+    rows = rows_of(history)
+    assert rows and all(row["verdict"] == "ok" for row in rows), {row["verdict"] for row in rows}
+
+    refused = checked_run(node, profile, tmp_path / "sc", "5s", "--checker", "off")
+    assert refused.returncode == 2, f"a normal run must refuse it, got {refused.returncode}"
+    strong = write_profile(tmp_path / "strong.yaml", f"{keyspace}_sc")
+    assert checked_run(node, strong, tmp_path / "sc2", "2s", "--checker", "off").returncode == 0
+    refused = checked_run(node, strong, tmp_path / "ec2", "2s", "--checker", "off",
+                          "--unsafe-eventual", "--consistency", "one")
+    assert refused.returncode == 2, f"the mode must refuse an SC keyspace, got {refused.returncode}"
+

@@ -95,6 +95,7 @@ impl BulkFactory {
         write.set_consistency(match cli.consistency {
             CheckedConsistency::Quorum => Consistency::Quorum,
             CheckedConsistency::LocalQuorum => Consistency::LocalQuorum,
+            CheckedConsistency::One => Consistency::One,
         });
         write.set_request_timeout(Some(cli.request_timeout));
         let mut read = session

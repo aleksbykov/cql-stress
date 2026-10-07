@@ -594,11 +594,11 @@ one superseded on some cell, unrecorded, result ignored.
 keyspace DDL without `consistency = 'global'`; start-up requires a keyspace that is not
 strongly consistent.
 
-- [ ] Write tests first: `--consistency one` rejected without the flag; the DDL without
+- [x] Write tests first: `--consistency one` rejected without the flag; the DDL without
       `consistency`; a pytest on the compose node: an eventually consistent keyspace is
-      created and a short run at ONE is clean (one node cannot be stale).
-- [ ] Write the code.
-- [ ] Run verify; commit `test: add an eventually consistent mode for the verifier's controls [SCYLLADB-4519]`.
+      created and a short run at ONE is clean (one node cannot be stale). (The unit tests failed to compile. The pytest also checks that a normal run refuses that keyspace and the mode refuses a strongly consistent one, both exit 2.)
+- [x] Write the code. (The bulk writes follow `--consistency`, so they run at ONE too; the start-up line names the keyspace eventually consistent in this mode.)
+- [x] Run verify; commit `test: add an eventually consistent mode for the verifier's controls [SCYLLADB-4519]`.
 
 ## Task 31 — local cluster runs
 
